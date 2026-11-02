@@ -77,9 +77,11 @@ static GUARDING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::
 
 /// The boards recorded in this design: body name to its tag.
 fn design_boards(app: &mut SolveApp) -> serde_json::Map<String, serde_json::Value> {
+    // Another tool's data comes back under `metadata`; `properties` holds only SolidCraft's own text fields (author,
+    // description, part_number, …) and answers null for this key, which would leave the guard blind.
     app.run("document.metadata", json!({}))
         .ok()
-        .and_then(|answer| answer.get("properties")?.get(KEY)?.get("boards")?.as_object().cloned())
+        .and_then(|answer| answer.get("metadata")?.get(KEY)?.get("boards")?.as_object().cloned())
         .unwrap_or_default()
 }
 
