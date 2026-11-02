@@ -15,6 +15,7 @@ pub mod agent_cursor;
 pub mod ai_connect;
 pub mod bidi;
 pub mod bom_panel;
+
 pub mod browser;
 pub mod browser_canvas;
 pub mod browser_prompts;
@@ -100,6 +101,7 @@ pub mod issue_report;
 pub mod joint_drag;
 pub(crate) mod joint_handles;
 pub mod keymap;
+pub mod ledger_boards;
 mod length_input;
 mod linked_source;
 #[cfg(test)]

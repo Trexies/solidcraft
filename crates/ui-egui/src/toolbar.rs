@@ -1329,6 +1329,14 @@ pub fn toolbar(app: &mut SolveApp, ui: &mut egui::Ui) {
             return;
         }
         ribbon_tabs(app, ui, Rect::from_min_max(pos2(ribbon_left, r.top()), pos2(r.right(), r.top() + TAB_ROW_HEIGHT)));
+        if app.ui.tab == "LEDGER" {
+            // The Ledger tab's content is the shop's boards - data, not commands - so it draws its own panel rather than
+            // the registry's buttons.
+            let top = r.top() + TAB_ROW_HEIGHT;
+            let area = Rect::from_min_max(pos2(ribbon_left + t.space_2, top), pos2(r.right() - t.space_2, top + group_height));
+            crate::ledger_boards::ribbon(app, ui, area);
+            return;
+        }
         // Panels.
         let tab = app.ui.tab.clone();
         // The command whose tool or dialog is open right now, shown pressed in the toolbar.

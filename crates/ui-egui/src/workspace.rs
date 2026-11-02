@@ -602,8 +602,12 @@ pub struct SpecialtyTab {
     pub icon: &'static str,
 }
 
-pub const SPECIALTY_TABS: &[SpecialtyTab] =
-    &[SpecialtyTab { tab: "SHEET METAL", icon: "sheet" }, SpecialtyTab { tab: "WELDMENTS", icon: "frame_member" }];
+pub const SPECIALTY_TABS: &[SpecialtyTab] = &[
+    SpecialtyTab { tab: "SHEET METAL", icon: "sheet" },
+    SpecialtyTab { tab: "WELDMENTS", icon: "frame_member" },
+    // The shop's boards, published by Ledger. Its content is data rather than commands, so the tab draws its own panel.
+    SpecialtyTab { tab: "LEDGER", icon: "box" },
+];
 
 /// A tab's row in the toolbar menu: the icon of the command that leads the tab (Model › Create ›
 /// Extrude, Inspect › Measure, View › Views and so on).
