@@ -1080,6 +1080,11 @@ impl SolveApp {
         let done = self.command_completed(id, r);
         if self.session.revision != revision {
             timeline::stop_playback(self);
+            // A board in the design is stock: its thickness and its sheet are not a person's to stretch. The guard measures
+            // the tagged bodies after any change and takes an illegal one back.
+            if done.is_ok() && !matches!(id, "edit.undo" | "edit.redo") {
+                crate::ledger_boards::enforce(self);
+            }
         }
         let selection_changed = self.session.selection != selected_before || matches!(id, "select.set" | "select.clear" | "select.same_look");
         if done.is_ok() && selection_changed {
