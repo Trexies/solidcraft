@@ -449,6 +449,11 @@ pub fn close(app: &mut SolveApp, i: usize, force: bool) {
     if i >= n {
         return;
     }
+    // Closing Ledger's own design tab sends it back to Ledger's folder rather than into a prompt: the record is Ledger's, and
+    // the operator was told not to be asked.
+    if !force && i == app.docs.active {
+        crate::ledger_boards::save_for_ledger(app);
+    }
     if !force && dirty(app, i) {
         app.docs.closing = Some(i);
         return;
@@ -565,6 +570,11 @@ fn quit_step(app: &mut SolveApp) {
     let Some(skip) = app.docs.quitting.clone() else { return };
     if app.docs.closing.is_some() {
         return;
+    }
+    // A design Ledger opened belongs in Ledger's own folder: it is written there on the way out, so closing asks nothing
+    // about it and nothing is lost. Designs that are the operator's still ask, as before.
+    if crate::ledger_boards::save_for_ledger(app) {
+        app.docs.closing = None;
     }
     match (0..app.docs.count()).find(|i| !skip.contains(i) && dirty(app, *i)) {
         Some(i) => {

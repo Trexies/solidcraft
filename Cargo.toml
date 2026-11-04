@@ -170,3 +170,15 @@ winit = { path = "vendor/winit" }
 [profile.mutants]
 inherits = "ci"
 incremental = true
+
+# Ledger's iteration profile: no optimisation and no debug info, so an edit to the Ledger tab rebuilds and links in well under
+# a minute instead of the ten the release build needs. Used only while working (`scripts/dev.sh`); the shipped binary is
+# `--release`, and this profile changes nothing about it.
+[profile.devfast]
+inherits = "dev"
+opt-level = 0
+debug = 0
+incremental = true
+
+[profile.devfast.package."*"]
+opt-level = 1

@@ -1085,6 +1085,10 @@ impl SolveApp {
             if done.is_ok() && !matches!(id, "edit.undo" | "edit.redo") {
                 crate::ledger_boards::enforce(self);
             }
+            // A board set down near another is closed onto it, so boards meet instead of nearly meeting.
+            if done.is_ok() {
+                crate::ledger_boards::snap_after_move(self, id, &params);
+            }
         }
         let selection_changed = self.session.selection != selected_before || matches!(id, "select.set" | "select.clear" | "select.same_look");
         if done.is_ok() && selection_changed {
