@@ -1334,8 +1334,14 @@ pub fn ribbon(app: &mut SolveApp, ui: &mut egui::Ui, area: Rect) {
     group_rule(ui, area, x);
 
     // Last - the item itself.
-    let actions = [("Name parts", "name"), ("Picture", "picture"), ("Reload", "reload")];
+    let actions = [
+        ("Bands", "bands"),
+        ("Name parts", "name"),
+        ("Picture", "picture"),
+        ("Reload", "reload"),
+    ];
     let widths = [
+        button_width(ui, "Bands"),
         button_width(ui, "Name parts"),
         button_width(ui, "Picture"),
         button_width(ui, "Reload"),
@@ -1347,10 +1353,23 @@ pub fn ribbon(app: &mut SolveApp, ui: &mut egui::Ui, area: Rect) {
         let icon = match *id {
             "picture" => "render_image",
             "name" => "rename",
+            "bands" => "edge_continuity",
             _ => "update",
         };
         if ribbon_button_icon(ui, id, rect, label, false, false, Some(icon)).clicked() {
             match *id {
+                "bands" => {
+                    let (merged, left) = crate::ledger_edgeband::merge(app);
+                    app.set_status(
+                        match (merged, left) {
+                            (0, 0) => "no edgebanding to merge".to_owned(),
+                            (0, left) => format!("{left} bands found, none beside a panel to join"),
+                            (merged, 0) => format!("{merged} edgebanding shells merged"),
+                            (merged, left) => format!("{merged} edgebanding shells merged, {left} left alone"),
+                        },
+                        false,
+                    );
+                }
                 "name" => {
                     let (named, unnamed) = crate::ledger_naming::name_parts(app);
                     app.set_status(
