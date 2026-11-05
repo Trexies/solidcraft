@@ -965,6 +965,8 @@ fn board_size_label(board: &Board) -> String {
 // every other tab's: a button row 60 high, the group's name under it in a 20 px row, and a hairline after it.
 const BUTTON_GAP: f32 = 3.0;
 const BUTTON_HEIGHT: f32 = 60.0;
+/// How far the label sits above a button's bottom edge when there is an icon over it.
+const BUTTON_LABEL_BOTTOM: f32 = 8.0;
 const BUTTON_MIN_WIDTH: f32 = 54.0;
 const BUTTON_MAX_WIDTH: f32 = 76.0;
 const BUTTON_LABEL_PADDING: f32 = 10.0;
@@ -986,6 +988,21 @@ fn button_width(ui: &egui::Ui, label: &str) -> f32 {
 
 /// One button of the tab, drawn as the ribbon draws its own: a rounded box, the label centred, a chevron when it opens a menu.
 fn ribbon_button(ui: &egui::Ui, id: &str, rect: Rect, label: &str, menu: bool, on: bool) -> egui::Response {
+    ribbon_button_icon(ui, id, rect, label, menu, on, None)
+}
+
+/// One button with an icon over its label, which is how every large button in the ribbon is drawn: the picture at the top, the
+/// word along the bottom. `None` keeps the label centred, for the short stacked buttons.
+#[allow(clippy::too_many_arguments)]
+fn ribbon_button_icon(
+    ui: &egui::Ui,
+    id: &str,
+    rect: Rect,
+    label: &str,
+    menu: bool,
+    on: bool,
+    icon: Option<&str>,
+) -> egui::Response {
     let t = Tokens::get();
     let response = ui.interact(rect, ui.id().with(("ledger_button", id)), Sense::click());
     // A pressed button reads in the tab's accent, the way the ribbon's own pressed buttons do - `selected_ink` is for a
@@ -1002,7 +1019,23 @@ fn ribbon_button(ui: &egui::Ui, id: &str, rect: Rect, label: &str, menu: bool, o
     ui.painter().rect(rect, t.radius_sm, fill, Stroke::new(1.0, if on { t.accent } else { t.border }), egui::StrokeKind::Inside);
     let galley = ui.painter().layout_no_wrap(label.to_owned(), crate::fonts::semibold(t.font_button), ink);
     let shift = if menu { 5.0 } else { 0.0 };
-    let at = pos2(rect.center().x - galley.size().x / 2.0 - shift, rect.center().y - galley.size().y / 2.0);
+    // With an icon the label sits along the bottom edge and the picture fills the space above it; without one it stays centred,
+    // which is right for a button only as tall as its word.
+    let at = match icon {
+        Some(_) => pos2(
+            rect.center().x - galley.size().x / 2.0 - shift,
+            rect.bottom() - BUTTON_LABEL_BOTTOM - galley.size().y,
+        ),
+        None => pos2(
+            rect.center().x - galley.size().x / 2.0 - shift,
+            rect.center().y - galley.size().y / 2.0,
+        ),
+    };
+    if let Some(icon) = icon {
+        let side = 20.0;
+        let icon_rect = Rect::from_center_size(pos2(rect.center().x, rect.top() + 18.0), vec2(side, side));
+        crate::icons::paint_icon(ui.painter(), icon_rect, icon, if on { 1.0 } else { 0.9 });
+    }
     ui.painter().galley(at, galley.clone(), ink);
     if menu {
         crate::ui_kit::dropdown_indicator(
@@ -1046,9 +1079,9 @@ fn group_rule(ui: &egui::Ui, area: Rect, x: f32) {
 fn board_dropdown(ui: &mut egui::Ui, rect: Rect, groups: &[(Option<String>, Vec<(String, Vec<Board>)>)]) -> (Option<Board>, Option<Board>) {
     let mut add: Option<Board> = None;
     let mut cut: Option<Board> = None;
-    let response = ribbon_button(ui, "board", rect, "Board", true, false);
+    let response = ribbon_button_icon(ui, "board", rect, "Board", true, false, Some("sheet"));
     let open = egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&response));
-    let response = ribbon_button(ui, "board", rect, "Board", true, open);
+    let response = ribbon_button_icon(ui, "board", rect, "Board", true, open, Some("sheet"));
     crate::scenario::publish_handle("ledger:board_menu", rect.center());
 
     // Sizes are leaves; a material opens them beside its row, and a folder opens the materials.
@@ -1089,9 +1122,9 @@ fn board_dropdown(ui: &mut egui::Ui, rect: Rect, groups: &[(Option<String>, Vec<
 /// than as a separate mode that happens to be next to it.
 fn grain_menu(app: &mut SolveApp, ui: &mut egui::Ui, rect: Rect) {
     let on = GRAIN_ON.load(std::sync::atomic::Ordering::Relaxed);
-    let response = ribbon_button(ui, "grain", rect, "Grain", true, false);
+    let response = ribbon_button_icon(ui, "grain", rect, "Grain", true, false, Some("material"));
     let open = egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&response));
-    let response = ribbon_button(ui, "grain", rect, "Grain", true, open);
+    let response = ribbon_button_icon(ui, "grain", rect, "Grain", true, open, Some("material"));
     let mut show: Option<bool> = None;
     let mut flip = false;
     egui::Popup::menu(&response)
@@ -1143,9 +1176,9 @@ fn grain_menu(app: &mut SolveApp, ui: &mut egui::Ui, rect: Rect) {
 fn skin_dropdown(app: &mut SolveApp, ui: &mut egui::Ui, rect: Rect, groups: &[(Option<String>, Vec<(String, Vec<Board>)>)]) {
     let selected = selected_bodies(app);
     let mut skin: Option<Board> = None;
-    let response = ribbon_button(ui, "skin", rect, "Skin", true, false);
+    let response = ribbon_button_icon(ui, "skin", rect, "Skin", true, false, Some("render_paint"));
     let open = egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&response));
-    let response = ribbon_button(ui, "skin", rect, "Skin", true, open);
+    let response = ribbon_button_icon(ui, "skin", rect, "Skin", true, open, Some("render_paint"));
     crate::scenario::publish_handle("ledger:skin_menu", rect.center());
 
     let list = |ui: &mut egui::Ui, materials: &[(String, Vec<Board>)], skin: &mut Option<Board>| {
@@ -1273,7 +1306,7 @@ pub fn ribbon(app: &mut SolveApp, ui: &mut egui::Ui, area: Rect) {
     let width = wire_w + grain_w + BUTTON_GAP + 2.0 * INSET;
     let wire_rect = Rect::from_min_size(pos2(x + INSET, top + 2.0), vec2(wire_w, BUTTON_HEIGHT));
     let mut wireframe = WIREFRAME_ON.load(std::sync::atomic::Ordering::Relaxed);
-    if ribbon_button(ui, "wireframe", wire_rect, "edges", false, wireframe).clicked() {
+    if ribbon_button_icon(ui, "wireframe", wire_rect, "edges", false, wireframe, Some("style_wireframe")).clicked() {
         wireframe = !wireframe;
         WIREFRAME_ON.store(wireframe, std::sync::atomic::Ordering::Relaxed);
         let style = if wireframe { "wireframe" } else { "shaded_with_edges" };
@@ -1294,7 +1327,7 @@ pub fn ribbon(app: &mut SolveApp, ui: &mut egui::Ui, area: Rect) {
     let grain_rect = Rect::from_min_size(pos2(wire_rect.right() + BUTTON_GAP, top + 2.0), vec2(grain_w, BUTTON_HEIGHT));
     grain_menu(app, ui, grain_rect);
     crate::scenario::publish_handle("ledger:grain", grain_rect.center());
-    group_caption(ui, area, x, width - wire_w - grain_w - BUTTON_GAP, "View");
+    group_caption(ui, area, x, width - 2.0 * INSET, "View");
     x += width + PANEL_GAP;
     group_rule(ui, area, x);
 
@@ -1305,7 +1338,8 @@ pub fn ribbon(app: &mut SolveApp, ui: &mut egui::Ui, area: Rect) {
     let mut bx = x + INSET;
     for ((label, id), button) in actions.iter().zip(widths) {
         let rect = Rect::from_min_size(pos2(bx, top + 2.0), vec2(button, BUTTON_HEIGHT));
-        if ribbon_button(ui, id, rect, label, false, false).clicked() {
+        let icon = if *id == "picture" { "render_image" } else { "update" };
+        if ribbon_button_icon(ui, id, rect, label, false, false, Some(icon)).clicked() {
             match *id {
                 "picture" => match picture(app) {
                     Ok(note) => app.set_status(note, false),
@@ -1366,7 +1400,7 @@ fn materials_panel(app: &mut SolveApp, ui: &mut egui::Ui, area: Rect, mut x: f32
     let (add, cut) = board_dropdown(ui, board_rect, &groups);
     let mut snap = SNAP_ON.load(std::sync::atomic::Ordering::Relaxed);
     let snap_rect = Rect::from_min_size(pos2(board_rect.right() + BUTTON_GAP, top + 2.0), vec2(snap_w, BUTTON_HEIGHT));
-    if ribbon_button(ui, "snap", snap_rect, "snap", false, snap).clicked() {
+    if ribbon_button_icon(ui, "snap", snap_rect, "snap", false, snap, Some("align")).clicked() {
         snap = !snap;
         SNAP_ON.store(snap, std::sync::atomic::Ordering::Relaxed);
     }
