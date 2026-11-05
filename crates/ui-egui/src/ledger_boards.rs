@@ -1023,11 +1023,17 @@ fn ribbon_button_icon(
     };
     ui.painter().rect(rect, t.radius_sm, fill, Stroke::new(1.0, if on { t.accent } else { t.border }), egui::StrokeKind::Inside);
     // A label longer than the button wraps to a second line, the way the ribbon's own large buttons do, instead of running out
-    // over the border.
+    // over the border - centred, and in the smaller face the ribbon uses under its icons, so a two-line label does not fight the
+    // word above it for width.
     let wrap = (rect.width() - BUTTON_LABEL_PADDING).max(24.0);
-    let galley = ui
-        .painter()
-        .layout(label.to_owned(), crate::fonts::semibold(t.font_button), ink, wrap);
+    let mut job = egui::text::LayoutJob::simple(
+        label.to_owned(),
+        crate::fonts::semibold(t.font_small),
+        ink,
+        wrap,
+    );
+    job.halign = egui::Align::Center;
+    let galley = ui.painter().layout_job(job);
     let shift = if menu { 5.0 } else { 0.0 };
     // With an icon the label sits along the bottom edge and the picture fills the space above it; without one it stays centred,
     // which is right for a button only as tall as its word.
