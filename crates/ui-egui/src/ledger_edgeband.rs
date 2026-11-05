@@ -14,9 +14,21 @@ struct Box3 {
     name: String,
     lo: [f64; 3],
     hi: [f64; 3],
+    volume: f64,
 }
 
 impl Box3 {
+    /// How much of its own box the body fills. A slab is nearly 1.0; a band that runs round a panel's edge is a ring, so its
+    /// box is as big as the panel and it fills a small part of it - which is why thickness alone never found it.
+    fn fills(&self) -> f64 {
+        let size = self.size();
+        let box_volume = size[0] * size[1] * size[2];
+        if box_volume <= 0.0 || self.volume <= 0.0 {
+            return 1.0;
+        }
+        self.volume / box_volume
+    }
+
     fn size(&self) -> [f64; 3] {
         [self.hi[0] - self.lo[0], self.hi[1] - self.lo[1], self.hi[2] - self.lo[2]]
     }
@@ -29,6 +41,8 @@ const BAND_MM: f64 = 4.0;
 const TOUCH_MM: f64 = 3.0;
 /// How much of the panel the band has to run along before the pair is believed.
 const OVERLAP_MM: f64 = 1.0;
+/// A body filling less than this share of its own box is a ring - edgebanding that runs right round a panel.
+const HOLLOW: f64 = 0.35;
 
 fn boxes(value: &Value) -> Vec<Box3> {
     let mut out = Vec::new();
@@ -43,7 +57,8 @@ fn boxes(value: &Value) -> Vec<Box3> {
             Some([list.first()?.as_f64()?, list.get(1)?.as_f64()?, list.get(2)?.as_f64()?])
         };
         let (Some(lo), Some(hi)) = (corner("min"), corner("max")) else { continue };
-        out.push(Box3 { name: name.to_owned(), lo, hi });
+        let volume = body.get("volume_mm3").and_then(Value::as_f64).unwrap_or(0.0);
+        out.push(Box3 { name: name.to_owned(), lo, hi, volume });
     }
     out
 }
@@ -75,11 +90,14 @@ pub fn merge(app: &mut crate::SolveApp) -> (usize, usize) {
         let mut axes = [0usize, 1, 2];
         axes.sort_by(|a, b| size[*a].total_cmp(&size[*b]));
         let thin_axis = axes[0];
-        if size[thin_axis] > BAND_MM {
+        // A strip is thin across its box; a band running right round a panel is a ring, and its box is as big as the panel's.
+        let strip = size[thin_axis] <= BAND_MM;
+        let ring = band.fills() < HOLLOW;
+        if !strip && !ring {
             continue;
         }
         // A band runs along at least one axis; a washer-sized chip is not edgebanding.
-        if size[axes[1]] < 10.0 {
+        if strip && size[axes[1]] < 10.0 {
             continue;
         }
         let others = [(thin_axis + 1) % 3, (thin_axis + 2) % 3];
@@ -89,6 +107,23 @@ pub fn merge(app: &mut crate::SolveApp) -> (usize, usize) {
                 continue;
             }
             if panel.size()[thin_axis] <= BAND_MM {
+                continue;
+            }
+            if ring {
+                // The ring wraps a panel: share its footprint on both long axes, and overlap it on the third.
+                let shared_axes = (0..3).filter(|axis| {
+                    band.hi[*axis].min(panel.hi[*axis]) - band.lo[*axis].max(panel.lo[*axis]) > 0.0
+                }).count();
+                let inside = panel.size().iter().sum::<f64>() > size.iter().sum::<f64>() * 0.9;
+                if shared_axes < 2 || !inside {
+                    continue;
+                }
+                let overlap = (0..3)
+                    .map(|axis| band.hi[axis].min(panel.hi[axis]) - band.lo[axis].max(panel.lo[axis]))
+                    .fold(1.0f64, |scale, value| scale * value.max(0.0));
+                if overlap > 0.0 && best.is_none_or(|(_, area)| overlap > area) {
+                    best = Some((candidate, overlap));
+                }
                 continue;
             }
             let gap = if band.hi[thin_axis] < panel.lo[thin_axis] {

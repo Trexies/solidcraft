@@ -14,6 +14,7 @@ struct Box3 {
     name: String,
     lo: [f64; 3],
     hi: [f64; 3],
+    volume: f64,
 }
 
 impl Box3 {
@@ -47,6 +48,12 @@ fn describe(body: &Box3, whole: [f64; 3], lo: [f64; 3], hi: [f64; 3]) -> Option<
     let middle = size[order[1]];
     // The board gate: nothing is a shelf until it measures like a board.
     if !(THINNEST_BOARD_MM..=THICKEST_BOARD_MM).contains(&thin) || thin > middle * BOARD_RATIO {
+        return None;
+    }
+    // A band that runs right round a panel has the panel's box but a fraction of its volume. It is not a top, however flat it
+    // measures: naming it one is how an edgebanding ring became `top (2)`.
+    let box_volume = size[0] * size[1] * size[2];
+    if body.volume > 0.0 && box_volume > 0.0 && body.volume / box_volume < 0.35 {
         return None;
     }
     let mid = [whole[0] / 2.0, whole[1] / 2.0];
@@ -112,7 +119,8 @@ fn boxes(value: &Value) -> Vec<Box3> {
             Some([list.first()?.as_f64()?, list.get(1)?.as_f64()?, list.get(2)?.as_f64()?])
         };
         let (Some(lo), Some(hi)) = (corner("min"), corner("max")) else { continue };
-        out.push(Box3 { name: name.to_owned(), lo, hi });
+        let volume = body.get("volume_mm3").and_then(Value::as_f64).unwrap_or(0.0);
+        out.push(Box3 { name: name.to_owned(), lo, hi, volume });
     }
     out
 }
