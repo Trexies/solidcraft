@@ -1346,7 +1346,7 @@ pub fn ribbon(app: &mut SolveApp, ui: &mut egui::Ui, area: Rect) {
     group_rule(ui, area, x);
     x = match sub {
         Subtab::Materials => materials_panel(app, ui, area, x),
-        Subtab::Hardware => hardware_panel(ui, area, x),
+        Subtab::Hardware => hardware_panel(app, ui, area, x),
     };
     group_rule(ui, area, x);
 
@@ -1537,7 +1537,7 @@ fn materials_panel(app: &mut SolveApp, ui: &mut egui::Ui, area: Rect, mut x: f32
 }
 
 /// The shop's hardware: a plain list in its own group, because the editor has no part files to place yet.
-fn hardware_panel(ui: &egui::Ui, area: Rect, x: f32) -> f32 {
+fn hardware_panel(app: &mut SolveApp, ui: &egui::Ui, area: Rect, x: f32) -> f32 {
     let t = Tokens::get();
     let top = area.top();
     let (rows, error) = hardware(false);
@@ -1574,7 +1574,27 @@ fn hardware_panel(ui: &egui::Ui, area: Rect, x: f32) -> f32 {
         y += 22.0;
     }
     group_caption(ui, area, x, width, "Hardware");
-    x + width + PANEL_GAP
+    let mut x = x + width + PANEL_GAP;
+    group_rule(ui, area, x);
+    // Counting camlocks happens here now: on the design, where the seams can be seen while they are worked out.
+    let label = "Calc Camlocks";
+    let width = button_width_at(ui, label, 110.0) + 2.0 * INSET;
+    let rect = Rect::from_min_size(pos2(x + INSET, top + 2.0), vec2(width - 2.0 * INSET, BUTTON_HEIGHT));
+    if ribbon_button_icon(ui, "camlocks", rect, label, false, false, Some("edge_continuity")).clicked() {
+        let (cams, seams) = crate::ledger_cams::calc(app);
+        app.set_status(
+            match (cams, seams) {
+                (0, 0) => "no seams to count - a flat-pack carcass needs two boards meeting".to_owned(),
+                (0, seams) => format!("{seams} seams found, no bore fitted on them"),
+                (cams, seams) => format!("{cams} camlocks marked on {seams} seams"),
+            },
+            false,
+        );
+    }
+    crate::scenario::publish_target("ledger:camlocks", rect);
+    group_caption(ui, area, x, width, "Camlocks");
+    x += width + PANEL_GAP;
+    x
 }
 
 /// The bodies selected in the model, by name: bodies only, because a face or an edge is not something a material covers.
