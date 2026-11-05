@@ -991,6 +991,45 @@ fn button_width_at(ui: &egui::Ui, label: &str, ceiling: f32) -> f32 {
     (galley.size().x + BUTTON_LABEL_PADDING).clamp(BUTTON_MIN_WIDTH, ceiling)
 }
 
+/// The words of a label, broken so each line fits `max_width`. A single word longer than the button is left whole rather than
+/// cut - it is better to see it than to read an ellipsis.
+fn break_label(
+    painter: &egui::Painter,
+    label: &str,
+    font: &egui::FontId,
+    max_width: f32,
+) -> Vec<String> {
+    let width = |text: &str| {
+        painter
+            .layout_no_wrap(text.to_owned(), font.clone(), egui::Color32::WHITE)
+            .size()
+            .x
+    };
+    if width(label) <= max_width {
+        return vec![label.to_owned()];
+    }
+    let words: Vec<&str> = label.split_whitespace().collect();
+    let mut lines: Vec<String> = Vec::new();
+    let mut current = String::new();
+    for word in words {
+        let candidate = if current.is_empty() {
+            word.to_owned()
+        } else {
+            format!("{current} {word}")
+        };
+        if width(&candidate) <= max_width || current.is_empty() {
+            current = candidate;
+        } else {
+            lines.push(std::mem::take(&mut current));
+            current = word.to_owned();
+        }
+    }
+    if !current.is_empty() {
+        lines.push(current);
+    }
+    lines
+}
+
 /// One button of the tab, drawn as the ribbon draws its own: a rounded box, the label centred, a chevron when it opens a menu.
 fn ribbon_button(ui: &egui::Ui, id: &str, rect: Rect, label: &str, menu: bool, on: bool) -> egui::Response {
     ribbon_button_icon(ui, id, rect, label, menu, on, None)
@@ -1022,42 +1061,36 @@ fn ribbon_button_icon(
         t.toolbar
     };
     ui.painter().rect(rect, t.radius_sm, fill, Stroke::new(1.0, if on { t.accent } else { t.border }), egui::StrokeKind::Inside);
-    // A label longer than the button wraps to a second line, the way the ribbon's own large buttons do, instead of running out
-    // over the border - centred, and in the smaller face the ribbon uses under its icons, so a two-line label does not fight the
-    // word above it for width.
-    let wrap = (rect.width() - BUTTON_LABEL_PADDING).max(24.0);
-    let mut job = egui::text::LayoutJob::simple(
-        label.to_owned(),
-        crate::fonts::semibold(t.font_small),
-        ink,
-        wrap,
-    );
-    job.halign = egui::Align::Center;
-    let galley = ui.painter().layout_job(job);
-    let shift = if menu { 5.0 } else { 0.0 };
-    // With an icon the label sits along the bottom edge and the picture fills the space above it; without one it stays centred,
-    // which is right for a button only as tall as its word.
-    let at = match icon {
-        Some(_) => pos2(
-            rect.center().x - galley.size().x / 2.0 - shift,
-            rect.bottom() - BUTTON_LABEL_BOTTOM - galley.size().y,
-        ),
-        None => pos2(
-            rect.center().x - galley.size().x / 2.0 - shift,
-            rect.center().y - galley.size().y / 2.0,
-        ),
+    // A label longer than the button breaks into lines that each fit, and every line is drawn centred. This is done by hand
+    // rather than through a wrapping layout job: with a centre alignment that job returns a galley as wide as the wrap width,
+    // and the words were drawn past the button's edge.
+    let font = crate::fonts::semibold(t.font_small);
+    let max_width = (rect.width() - BUTTON_LABEL_PADDING).max(24.0);
+    let lines = break_label(ui.painter(), label, &font, max_width);
+    let line_height = ui.painter().layout_no_wrap("Ag".to_owned(), font.clone(), ink).size().y;
+    let block_height = line_height * lines.len() as f32;
+    let mut line_y = match icon {
+        Some(_) => rect.bottom() - BUTTON_LABEL_BOTTOM - block_height,
+        None => rect.center().y - block_height / 2.0,
     };
+    for line in &lines {
+        let galley = ui.painter().layout_no_wrap(line.clone(), font.clone(), ink);
+        ui.painter().galley(
+            pos2(rect.center().x - galley.size().x / 2.0, line_y),
+            galley,
+            ink,
+        );
+        line_y += line_height;
+    }
+    let label_line_y = rect.bottom() - BUTTON_LABEL_BOTTOM - line_height;
     if let Some(icon) = icon {
         let side = 20.0;
         let icon_rect = Rect::from_center_size(pos2(rect.center().x, rect.top() + 16.0), vec2(side, side));
         crate::icons::paint_icon(ui.painter(), icon_rect, icon, if on { 1.0 } else { 0.9 });
     }
-    ui.painter().galley(at, galley.clone(), ink);
     if menu {
-        // Inside the button's own right edge, on the label's line: measured from the centre plus half the word, a long label
-        // pushed the arrow out past the box.
         let arrow = Rect::from_center_size(
-            pos2(rect.right() - 7.0, at.y + galley.size().y / 2.0),
+            pos2(rect.right() - 7.0, label_line_y + line_height / 2.0),
             vec2(10.0, 10.0),
         );
         crate::ui_kit::dropdown_indicator(ui.painter(), arrow, t.text_dim);
