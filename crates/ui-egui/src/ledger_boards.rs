@@ -1022,7 +1022,12 @@ fn ribbon_button_icon(
         t.toolbar
     };
     ui.painter().rect(rect, t.radius_sm, fill, Stroke::new(1.0, if on { t.accent } else { t.border }), egui::StrokeKind::Inside);
-    let galley = ui.painter().layout_no_wrap(label.to_owned(), crate::fonts::semibold(t.font_button), ink);
+    // A label longer than the button wraps to a second line, the way the ribbon's own large buttons do, instead of running out
+    // over the border.
+    let wrap = (rect.width() - BUTTON_LABEL_PADDING).max(24.0);
+    let galley = ui
+        .painter()
+        .layout(label.to_owned(), crate::fonts::semibold(t.font_button), ink, wrap);
     let shift = if menu { 5.0 } else { 0.0 };
     // With an icon the label sits along the bottom edge and the picture fills the space above it; without one it stays centred,
     // which is right for a button only as tall as its word.
@@ -1038,7 +1043,7 @@ fn ribbon_button_icon(
     };
     if let Some(icon) = icon {
         let side = 20.0;
-        let icon_rect = Rect::from_center_size(pos2(rect.center().x, rect.top() + 18.0), vec2(side, side));
+        let icon_rect = Rect::from_center_size(pos2(rect.center().x, rect.top() + 16.0), vec2(side, side));
         crate::icons::paint_icon(ui.painter(), icon_rect, icon, if on { 1.0 } else { 0.9 });
     }
     ui.painter().galley(at, galley.clone(), ink);
