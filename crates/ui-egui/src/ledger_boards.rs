@@ -1364,13 +1364,28 @@ pub fn ribbon(app: &mut SolveApp, ui: &mut egui::Ui, area: Rect) {
         if ribbon_button_icon(ui, id, rect, label, false, false, Some(icon)).clicked() {
             match *id {
                 "bands" => {
-                    let (merged, left) = crate::ledger_edgeband::merge(app);
+                    let (merged, removed, left) = crate::ledger_edgeband::merge(app);
+                    let mut parts: Vec<String> = Vec::new();
+                    if merged > 0 {
+                        parts.push(format!(
+                            "{merged} edgebanding {} merged",
+                            if merged == 1 { "shell" } else { "shells" }
+                        ));
+                    }
+                    if removed > 0 {
+                        parts.push(format!(
+                            "{removed} hollow {} removed (shell geometry cannot be joined)",
+                            if removed == 1 { "band" } else { "bands" }
+                        ));
+                    }
+                    if left > 0 {
+                        parts.push(format!("{left} left alone"));
+                    }
                     app.set_status(
-                        match (merged, left) {
-                            (0, 0) => "no edgebanding to merge".to_owned(),
-                            (0, left) => format!("{left} bands found, none beside a panel to join"),
-                            (merged, 0) => format!("{merged} edgebanding shells merged"),
-                            (merged, left) => format!("{merged} edgebanding shells merged, {left} left alone"),
+                        if parts.is_empty() {
+                            "no edgebanding to merge".to_owned()
+                        } else {
+                            parts.join(", ")
                         },
                         false,
                     );

@@ -84,14 +84,18 @@ fn boxes(value: &Value) -> Vec<Box3> {
     out
 }
 
-/// Join every band that can be joined. Answers (merged, left alone).
-pub fn merge(app: &mut crate::SolveApp) -> (usize, usize) {
+/// Join every band that can be joined. Answers (joined, removed, left alone).
+///
+/// A band drawn as a hollow shell shares faces with its panel, and the kernel has no closed solid to join: it returns nothing
+/// however the pair is offered. Such a band is **removed** instead - it sits on the panel's own faces, so deleting it leaves the
+/// panel exactly as drawn and no gap - and its count is reported, never hidden.
+pub fn merge(app: &mut crate::SolveApp) -> (usize, usize, usize) {
     let Ok(measured) = app.session.execute("inspect.measure", &json!({})) else {
-        return (0, 0);
+        return (0, 0, 0);
     };
     let bodies = boxes(&measured);
     if bodies.len() < 2 {
-        return (0, 0);
+        return (0, 0, 0);
     }
     // Thinnest first, so a band is joined to a panel rather than to another band.
     let mut order: Vec<usize> = (0..bodies.len()).collect();
@@ -101,6 +105,7 @@ pub fn merge(app: &mut crate::SolveApp) -> (usize, usize) {
     });
     let mut gone = vec![false; bodies.len()];
     let mut merged = 0usize;
+    let mut removed = 0usize;
     let mut left = 0usize;
     for index in order {
         if gone[index] {
@@ -154,6 +159,18 @@ pub fn merge(app: &mut crate::SolveApp) -> (usize, usize) {
             if joined {
                 merged += 1;
                 gone[index] = true;
+            } else if is_shell(band) {
+                // Coincident and hollow: there is no solid to join, and removing it leaves the panel exactly as drawn.
+                let gone_ok = app
+                    .session
+                    .execute("solid.remove", &json!({ "bodies": [band.name] }))
+                    .is_ok();
+                if gone_ok {
+                    removed += 1;
+                    gone[index] = true;
+                } else {
+                    left += 1;
+                }
             } else {
                 left += 1;
             }
@@ -207,9 +224,27 @@ pub fn merge(app: &mut crate::SolveApp) -> (usize, usize) {
         if joined {
             merged += 1;
             gone[index] = true;
+        } else if is_shell(band) {
+            let gone_ok = app
+                .session
+                .execute("solid.remove", &json!({ "bodies": [band.name] }))
+                .is_ok();
+            if gone_ok {
+                removed += 1;
+                gone[index] = true;
+            } else {
+                left += 1;
+            }
         } else {
             left += 1;
         }
     }
-    (merged, left)
+    (merged, removed, left)
+}
+
+/// A band that fills only part of its own box is a hollow shell - the drawing's way of drawing an edge, not a solid strip.
+/// Volumes are compared by magnitude: imported bodies report negative volume when their faces face inward.
+fn is_shell(band: &Box3) -> bool {
+    let box_volume = band.box_volume();
+    box_volume > 0.0 && band.material() < box_volume * 0.7
 }
