@@ -970,7 +970,7 @@ const BUTTON_MAX_WIDTH: f32 = 76.0;
 const BUTTON_LABEL_PADDING: f32 = 10.0;
 const SECTION_HEIGHT: f32 = 20.0;
 const INSET: f32 = 4.0;
-const PANEL_GAP: f32 = 1.0;
+const PANEL_GAP: f32 = 10.0;
 /// The big buttons of this tab are squares: this tab's buttons are words, not icons, and a wide thin box reads as a chip
 /// rather than as part of the ribbon. Narrow enough that `Picture` still fits, wide enough that `Board ▾` does.
 const SQUARE: f32 = 74.0;
@@ -1029,9 +1029,14 @@ fn group_caption(ui: &egui::Ui, area: Rect, left: f32, width: f32, caption: &str
         .layout_no_wrap(caption.to_owned(), egui::FontId::proportional(t.font_caption), t.text_dim);
     let at = pos2(row.center().x - galley.size().x / 2.0, row.center().y - galley.size().y / 2.0);
     ui.painter().galley(at, galley, t.text_dim);
-    let edge = left + width + PANEL_GAP * 0.5;
+}
+
+/// The hairline between two groups, drawn **once** at the boundary by the group that starts after it. Two groups each drawing
+/// their own edge put two lines a pixel apart, which read as a doubled divider.
+fn group_rule(ui: &egui::Ui, area: Rect, x: f32) {
+    let t = Tokens::get();
     ui.painter().line_segment(
-        [pos2(edge, area.top() + 2.0), pos2(edge, area.bottom() - 1.0)],
+        [pos2(x - PANEL_GAP * 0.5, area.top() + 2.0), pos2(x - PANEL_GAP * 0.5, area.bottom() - 1.0)],
         t.tertiary_border(t.border),
     );
 }
@@ -1254,15 +1259,18 @@ pub fn ribbon(app: &mut SolveApp, ui: &mut egui::Ui, area: Rect) {
     group_caption(ui, area, x, width, "List");
     x += width + PANEL_GAP;
 
+    group_rule(ui, area, x);
     x = match sub {
         Subtab::Materials => materials_panel(app, ui, area, x),
         Subtab::Hardware => hardware_panel(ui, area, x),
     };
+    group_rule(ui, area, x);
 
     // The view switch is the tab's, not the materials list's: on the hardware subtab the model still has to be readable, and the
     // shop asked to swap views while working rather than through the host program.
-    let wire_w = SQUARE;
-    let width = wire_w * 2.0 + BUTTON_GAP + 2.0 * INSET;
+    let wire_w = button_width(ui, "edges");
+    let grain_w = button_width(ui, "Grain");
+    let width = wire_w + grain_w + BUTTON_GAP + 2.0 * INSET;
     let wire_rect = Rect::from_min_size(pos2(x + INSET, top + 2.0), vec2(wire_w, BUTTON_HEIGHT));
     let mut wireframe = WIREFRAME_ON.load(std::sync::atomic::Ordering::Relaxed);
     if ribbon_button(ui, "wireframe", wire_rect, "edges", false, wireframe).clicked() {
@@ -1283,15 +1291,16 @@ pub fn ribbon(app: &mut SolveApp, ui: &mut egui::Ui, area: Rect) {
     crate::scenario::publish_handle("ledger:wireframe", wire_rect.center());
 
     // The grain: a menu, the way the rest of the ribbon offers a set of related commands - show it, or turn it round.
-    let grain_rect = Rect::from_min_size(pos2(wire_rect.right() + BUTTON_GAP, top + 2.0), vec2(wire_w, BUTTON_HEIGHT));
+    let grain_rect = Rect::from_min_size(pos2(wire_rect.right() + BUTTON_GAP, top + 2.0), vec2(grain_w, BUTTON_HEIGHT));
     grain_menu(app, ui, grain_rect);
     crate::scenario::publish_handle("ledger:grain", grain_rect.center());
-    group_caption(ui, area, x, width - wire_w * 2.0 - BUTTON_GAP, "View");
+    group_caption(ui, area, x, width - wire_w - grain_w - BUTTON_GAP, "View");
     x += width + PANEL_GAP;
+    group_rule(ui, area, x);
 
     // Last - the item itself.
     let actions = [("Picture", "picture"), ("Reload", "reload")];
-    let widths = [SQUARE; 2];
+    let widths = [button_width(ui, "Picture"), button_width(ui, "Reload")];
     let width = widths.iter().sum::<f32>() + BUTTON_GAP + 2.0 * INSET;
     let mut bx = x + INSET;
     for ((label, id), button) in actions.iter().zip(widths) {
