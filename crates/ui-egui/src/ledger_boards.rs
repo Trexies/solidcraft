@@ -1038,11 +1038,13 @@ fn ribbon_button_icon(
     }
     ui.painter().galley(at, galley.clone(), ink);
     if menu {
-        crate::ui_kit::dropdown_indicator(
-            ui.painter(),
-            Rect::from_center_size(pos2(rect.center().x + galley.size().x / 2.0 + 8.0, rect.center().y), vec2(10.0, 10.0)),
-            t.text_dim,
+        // Inside the button's own right edge, on the label's line: measured from the centre plus half the word, a long label
+        // pushed the arrow out past the box.
+        let arrow = Rect::from_center_size(
+            pos2(rect.right() - 7.0, at.y + galley.size().y / 2.0),
+            vec2(10.0, 10.0),
         );
+        crate::ui_kit::dropdown_indicator(ui.painter(), arrow, t.text_dim);
     }
     if response.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
