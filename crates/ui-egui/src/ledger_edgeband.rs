@@ -43,6 +43,8 @@ const TOUCH_MM: f64 = 3.0;
 const OVERLAP_MM: f64 = 1.0;
 /// A body filling less than this share of its own box is a ring - edgebanding that runs right round a panel.
 const HOLLOW: f64 = 0.35;
+/// How small both short sides of a profile have to be: an angle of edgebanding, not a leg (150 mm across) or a rail (100 mm).
+const PROFILE_MM: f64 = 45.0;
 
 fn boxes(value: &Value) -> Vec<Box3> {
     let mut out = Vec::new();
@@ -93,7 +95,13 @@ pub fn merge(app: &mut crate::SolveApp) -> (usize, usize) {
         // A strip is thin across its box; a band running right round a panel is a ring, and its box is as big as the panel's.
         let strip = size[thin_axis] <= BAND_MM;
         let ring = band.fills() < HOLLOW;
-        if !strip && !ring {
+        // A band can also be an angle: 25 x 25 across, running the length of a panel. It is neither thin nor hollow - it fills
+        // about half its box - but its cross-section is a profile, not a board, which is what the shop sees when it points at it.
+        let profile = size[axes[0]] <= PROFILE_MM
+            && size[axes[1]] <= PROFILE_MM
+            && size[axes[2]] >= 5.0 * size[axes[1]].max(1.0)
+            && size[axes[2]] >= 100.0;
+        if !strip && !ring && !profile {
             continue;
         }
         // A band runs along at least one axis; a washer-sized chip is not edgebanding.
