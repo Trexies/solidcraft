@@ -88,7 +88,12 @@ pub fn tick(app: &mut SolveApp) {
 pub fn start(app: &mut SolveApp, dir: &std::path::Path, interval: std::time::Duration) {
     match Autosaver::new(dir, SHARED_CADENCE) {
         Ok(a) => {
-            app.recoverable = recovery::orphans(dir);
+            // Nothing from a Ledger session is worth offering back: Ledger saves its own designs.
+            app.recoverable = if std::env::var_os("LEDGER_OWNED").is_some() {
+                Vec::new()
+            } else {
+                recovery::orphans(dir)
+            };
             app.autosave = Some(Autosaves { dir: dir.to_path_buf(), interval, active: Some(a), last_at: Instant::now() });
         }
         Err(e) => app.set_status(format!("autosave is off: {e}"), true),
@@ -123,6 +128,12 @@ pub(crate) fn ago(secs: u64) -> String {
 }
 
 pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
+    // Ledger drives this editor and saves every design it opens before the window closes, so a leftover record here is one of
+    // Ledger's own imports, not work anybody can lose. The prompt would arrive on a fresh import and block the commands that
+    // name the bodies, so it stays shut while Ledger owns the session.
+    if std::env::var_os("LEDGER_OWNED").is_some() {
+        return;
+    }
     // File view presents the same entries inline, without a second window covering them.
     if app.home.open || app.recoverable.is_empty() {
         return;

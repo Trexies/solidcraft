@@ -7,5 +7,5 @@ cd "$(dirname "$0")/.."
 # One shared target dir for every build on this machine: a new dir per experiment is how D: gained 116 GB.
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-D:/cargo-target}"
 cargo build --release -p solidcraft "$@"
-cp "$CARGO_TARGET_DIR/release/solidcraft.exe" "D:/SolidCraft/solidcraft.exe"
-ls -la "D:/SolidCraft/solidcraft.exe"
+cp "$CARGO_TARGET_DIR/release/solidcraft.exe" "D:/Ledger/SolidCraft/solidcraft.exe"
+ls -la "D:/Ledger/SolidCraft/solidcraft.exe"

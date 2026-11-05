@@ -720,6 +720,9 @@ pub fn tick(app: &mut SolveApp, ctx: &egui::Context) {
     if app.updater.job.is_none()
         && app.updater.rx.is_none()
         && app.preferences.check_updates
+        // Ledger ships this editor as part of the shop's own program. An editor that replaced itself from upstream could add
+        // or remove the LEDGER tab out from under Ledger, so this build never checks for an update.
+        && std::env::var_os("LEDGER_OWNED").is_none()
         && app.preferences.update.due(now, launch)
         && available(app)
     {

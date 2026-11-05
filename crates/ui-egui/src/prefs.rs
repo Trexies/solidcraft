@@ -1197,8 +1197,9 @@ preference_settings! {
     middle_double_click: String = "home".into(), PAGE_NAVIGATION;
     /// Colour vision mode (#778): `off`, `protan`, `deutan` or `tritan`.
     color_vision: crate::theme::ColorVision = crate::theme::ColorVision::Off, PAGE_INTERFACE;
-    /// Check for updates at start and once a day (docs/updates.md).
-    check_updates: bool = true, 0;
+    /// Check for updates at start and once a day (docs/updates.md). Off by default: this build is Ledger's, and an upstream
+    /// update could take the LEDGER tab with it.
+    check_updates: bool = false, 0;
     /// When the last update check ran, and the versions skipped or put off (`update::Memo`).
     update: crate::update::Memo = crate::update::Memo::default();
     /// The variant last started in each split tool family (Rectangle, Circle, Arc, Slot, Polygon, Line,
