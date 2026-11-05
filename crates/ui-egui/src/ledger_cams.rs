@@ -56,12 +56,27 @@ pub fn calc(app: &mut crate::SolveApp) -> (usize, usize) {
     let Ok(measured) = app.session.execute("inspect.measure", &json!({})) else {
         return (0, 0);
     };
+    // Bores already in the design are kept, and nothing new is put close enough to touch one: two markers in the same place
+    // read as one bore and hide each other in the wireframe.
+    let mut placed: Vec<[f64; 3]> = boxes(&measured)
+        .iter()
+        .filter(|body| body.name.starts_with("cam "))
+        .map(|body| {
+            [
+                (body.lo[0] + body.hi[0]) / 2.0,
+                (body.lo[1] + body.hi[1]) / 2.0,
+                (body.lo[2] + body.hi[2]) / 2.0,
+            ]
+        })
+        .collect();
     let bodies: Vec<Box3> = boxes(&measured).into_iter().filter(is_board).collect();
     if bodies.len() < 2 {
         return (0, 0);
     }
     let mut cams = 0usize;
     let mut seams = 0usize;
+    /// A carcass has tens of seams. Hundreds means the pairing is wrong, and drawing them would bury the design.
+    const MOST_CAMS: usize = 600;
     for a in 0..bodies.len() {
         for b in (a + 1)..bodies.len() {
             let (one, two) = (&bodies[a], &bodies[b]);
@@ -92,7 +107,10 @@ pub fn calc(app: &mut crate::SolveApp) -> (usize, usize) {
                     0.0
                 };
                 let overlap = one.hi[axis].min(two.hi[axis]) - one.lo[axis].max(two.lo[axis]);
-                if (0.0..=1.0).contains(&gap) && overlap > 0.0 {
+                // **Edge to face, not face to face.** Two boards whose faces lie on each other are a doubled panel, not a
+                // joint; a real seam has the end of one board (its thickness, at most) meeting the other's face. Without this
+                // the pass counted every overlapping pair and drew thousands of bores.
+                if (0.0..=1.0).contains(&gap) && overlap > 0.0 && overlap <= 45.0 {
                     meet = Some(axis);
                     break;
                 }
@@ -125,11 +143,28 @@ pub fn calc(app: &mut crate::SolveApp) -> (usize, usize) {
             } else {
                 two.lo[across_axis] + 9.0
             };
+            if cams >= MOST_CAMS {
+                return (cams, seams);
+            }
             for position in at {
                 let mut centre = [0.0f64; 3];
                 centre[shared_axis] = position;
                 centre[meet] = plane;
                 centre[across_axis] = face;
+                // Clearance: a bore needs its own space, so a seat closer than this to one already placed is dropped.
+                const CLEARANCE_MM: f64 = 20.0;
+                let too_close = placed.iter().any(|seen| {
+                    let mut square = 0.0;
+                    for axis in 0..3 {
+                        let gap = centre[axis] - seen[axis];
+                        square += gap * gap;
+                    }
+                    square.sqrt() < CLEARANCE_MM
+                });
+                if too_close {
+                    continue;
+                }
+                placed.push(centre);
                 cams += 1;
                 let name = format!("cam {cams}");
                 let _ = app.session.execute(
