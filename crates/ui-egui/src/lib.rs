@@ -102,6 +102,7 @@ pub mod joint_drag;
 pub(crate) mod joint_handles;
 pub mod keymap;
 pub mod ledger_boards;
+pub mod ledger_naming;
 mod length_input;
 mod linked_source;
 #[cfg(test)]

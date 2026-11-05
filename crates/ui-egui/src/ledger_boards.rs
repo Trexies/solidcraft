@@ -1334,15 +1334,37 @@ pub fn ribbon(app: &mut SolveApp, ui: &mut egui::Ui, area: Rect) {
     group_rule(ui, area, x);
 
     // Last - the item itself.
-    let actions = [("Picture", "picture"), ("Reload", "reload")];
-    let widths = [button_width(ui, "Picture"), button_width(ui, "Reload")];
+    let actions = [("Name parts", "name"), ("Picture", "picture"), ("Reload", "reload")];
+    let widths = [
+        button_width(ui, "Name parts"),
+        button_width(ui, "Picture"),
+        button_width(ui, "Reload"),
+    ];
     let width = widths.iter().sum::<f32>() + BUTTON_GAP + 2.0 * INSET;
     let mut bx = x + INSET;
     for ((label, id), button) in actions.iter().zip(widths) {
         let rect = Rect::from_min_size(pos2(bx, top + 2.0), vec2(button, BUTTON_HEIGHT));
-        let icon = if *id == "picture" { "render_image" } else { "update" };
+        let icon = match *id {
+            "picture" => "render_image",
+            "name" => "rename",
+            _ => "update",
+        };
         if ribbon_button_icon(ui, id, rect, label, false, false, Some(icon)).clicked() {
             match *id {
+                "name" => {
+                    let (named, unnamed) = crate::ledger_naming::name_parts(app);
+                    app.set_status(
+                        match (named, unnamed) {
+                            (0, 0) => "nothing in the design to name".to_owned(),
+                            (0, _) => format!("no body could be named - {unnamed} left as numbers"),
+                            (named, 0) => format!("{named} bodies named"),
+                            (named, unnamed) => {
+                                format!("{named} bodies named, {unnamed} left as numbers")
+                            }
+                        },
+                        false,
+                    );
+                }
                 "picture" => match picture(app) {
                     Ok(note) => app.set_status(note, false),
                     Err(why) => app.set_status(why, true),
