@@ -981,9 +981,14 @@ const STACKED_HEIGHT: f32 = 28.5;
 
 /// How wide a button has to be for its label, in the ribbon's own range.
 fn button_width(ui: &egui::Ui, label: &str) -> f32 {
+    button_width_at(ui, label, BUTTON_MAX_WIDTH)
+}
+
+/// The same measurement with its own ceiling, for a label longer than the ribbon's usual two words.
+fn button_width_at(ui: &egui::Ui, label: &str, ceiling: f32) -> f32 {
     let t = Tokens::get();
     let galley = ui.painter().layout_no_wrap(label.to_owned(), crate::fonts::semibold(t.font_button), t.text);
-    (galley.size().x + BUTTON_LABEL_PADDING).clamp(BUTTON_MIN_WIDTH, BUTTON_MAX_WIDTH)
+    (galley.size().x + BUTTON_LABEL_PADDING).clamp(BUTTON_MIN_WIDTH, ceiling)
 }
 
 /// One button of the tab, drawn as the ribbon draws its own: a rounded box, the label centred, a chevron when it opens a menu.
@@ -1335,13 +1340,13 @@ pub fn ribbon(app: &mut SolveApp, ui: &mut egui::Ui, area: Rect) {
 
     // Last - the item itself.
     let actions = [
-        ("Bands", "bands"),
+        ("Merge edgebanding", "bands"),
         ("Name parts", "name"),
         ("Picture", "picture"),
         ("Reload", "reload"),
     ];
     let widths = [
-        button_width(ui, "Bands"),
+        button_width_at(ui, "Merge edgebanding", 118.0),
         button_width(ui, "Name parts"),
         button_width(ui, "Picture"),
         button_width(ui, "Reload"),
