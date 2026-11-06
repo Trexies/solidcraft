@@ -104,6 +104,9 @@ pub mod keymap;
 pub mod ledger_boards;
 pub mod ledger_cams;
 pub mod ledger_edgeband;
+// Kept for its account of how a box cabinet's panels meet; the Calc Camlocks button runs the vendor engine instead (see
+// the module's docs). Not deleted, so nothing that reads it changes - silenced here because nothing calls it now.
+#[allow(dead_code)]
 pub(crate) mod ledger_joints;
 pub mod ledger_naming;
 mod length_input;

@@ -1,5 +1,10 @@
 //! Where the panels of a drawing meet, and which of those seams take a cam lock.
 //!
+//! **Dead for `Calc Camlocks`.** The button now runs `ledger-holes`, the vendor hole engine Ledger ships, and places one
+//! block per bore that engine returns (`crate::ledger_cams`). This module is kept, not deleted, because its seam model is
+//! still the readable statement of how a box cabinet's panels meet and the tests beside it still describe the joints;
+//! nothing on the button's path calls it, so a count from here is no longer a count the editor shows.
+//!
 //! This is Ledger's `src/joints.rs` translated into the editor, so the `Calc Camlocks` button marks the same bores Ledger's
 //! parts window marks. The module is a copy on purpose: the seam model is the shop's, and a rewrite of it would drift from
 //! the program the shop measures against.

@@ -1,15 +1,25 @@
-//! Counting camlocks from the seams in the model, and drawing a block at each bore.
+//! Calc Camlocks: the vendor's hole engine, run on the bodies the editor has open, and a block drawn at every bore.
 //!
-//! This is the pass the shop used to run from Ledger's parts window, moved to where the design is. It is Ledger's own seam
-//! model - [`crate::ledger_joints`], a translation of its `src/joints.rs` - run over the bodies the editor has open, so a
-//! cabinet answers the same count here as it does there: two cam bores on a seam, the first 20 mm from its near end and the
-//! last pinned 40 mm from the far one, wherever two boards 12-30 mm thick meet edge to face or edge to edge.
+//! This is the pass the shop runs from Ledger's parts window, moved to where the design is — and it is now literally the
+//! same code: `ledger-holes`, the crate Ledger's `src/vendor/` re-exports, which is the port of the vendor client's
+//! `CreateHolesInfo` / `AddSanHeYiToPart` / `CheckPunchConflict` chain. The bodies' names and world boxes go in as
+//! `translate::Board`s, the engine answers with the holes it would drill, and each hole becomes a `cam` block at its
+//! mouth. No seam rule of our own is applied here; the count is the engine's.
 //!
-//! A bore is a `cam` block - orange, the width of the cutter - never a hole in the panel, because cutting would destroy the
-//! drawing.
+//! A bore is a block - orange, the size of the cutter - never a hole in the panel, because cutting would destroy the
+//! drawing. The block is 15 x 15 x 14.2, the cam cup's own cutter, and it stands at the bore's mouth in model space: the
+//! engine reports a hole in its panel's frame, and [`ledger_holes::hole_at_world`] undoes that frame (and the vendor's
+//! `0..thickness` z scale) so the block lands where the panel is.
 
-use crate::ledger_joints::{self, Panel};
+use std::collections::BTreeSet;
+
+use ledger_holes::translate::Board;
+use ledger_holes::{Panel, Settings, hole_at_world, plan};
 use serde_json::{Value, json};
+
+/// The cam cup's cutter: the block this button has always drawn.
+const MARKER: f64 = 15.0;
+const MARKER_DEEP: f64 = 14.2;
 
 struct Box3 {
     name: String,
@@ -18,25 +28,10 @@ struct Box3 {
 }
 
 impl Box3 {
-    fn size(&self) -> [f64; 3] {
-        [self.hi[0] - self.lo[0], self.hi[1] - self.lo[1], self.hi[2] - self.lo[2]]
-    }
-
-    fn centre(&self) -> [f64; 3] {
-        [(self.lo[0] + self.hi[0]) / 2.0, (self.lo[1] + self.hi[1]) / 2.0, (self.lo[2] + self.hi[2]) / 2.0]
-    }
-
     /// A bore marker this button put in the design on an earlier click.
     fn is_marker(&self) -> bool {
         self.name.starts_with("cam ") || self.name.starts_with("dowel ")
     }
-}
-
-/// A board: a real thickness, and thin against its own middle dimension.
-fn is_board(body: &Box3) -> bool {
-    let mut size = body.size();
-    size.sort_by(f64::total_cmp);
-    size[0] >= 5.0 && size[0] <= 40.0 && size[0] <= size[1] * 0.30
 }
 
 fn boxes(value: &Value) -> Vec<Box3> {
@@ -58,73 +53,104 @@ fn boxes(value: &Value) -> Vec<Box3> {
     out
 }
 
-/// Count the seams between boards, and draw a cam block at every bore the shop's rule puts on them.
-/// Answers (cams drawn, seams found).
-pub fn calc(app: &mut crate::SolveApp) -> (usize, usize) {
+/// What one pass did: what it drew, and the engine's own account of the run.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct Outcome {
+    /// Markers placed - one per hole the engine returned.
+    pub holes: usize,
+    /// Panels the translation accepted.
+    pub panels: usize,
+    /// Joints whose first position punched a neighbour and were moved (`CheckPunchConflict`).
+    pub retried: usize,
+    /// Seams refused outright.
+    pub dropped: usize,
+    /// Seams no count table covered.
+    pub unbanded: usize,
+    /// Positions the port has no emitter for yet.
+    pub unported: usize,
+    /// Positions a `自定义` hole string spelled but could not be parsed.
+    pub unparsed: usize,
+}
+
+impl Outcome {
+    /// The status line, in the ribbon's voice.
+    pub fn message(&self) -> String {
+        if self.panels == 0 {
+            return "no boards to count - a flat-pack carcass needs two boards meeting".to_owned();
+        }
+        if self.holes == 0 {
+            return format!("{} panels, no bore fitted on them", self.panels);
+        }
+        format!(
+            "{} camlocks marked on {} panels (engine: retried {}, dropped {}, unbanded {}, unported {}, unparsed {})",
+            self.holes, self.panels, self.retried, self.dropped, self.unbanded, self.unported, self.unparsed
+        )
+    }
+}
+
+/// Run the vendor's engine over the selected bodies - or all of them when nothing is selected - and draw a block at
+/// every hole it returns.
+pub fn calc(app: &mut crate::SolveApp) -> Outcome {
     let Ok(measured) = app.session.execute("inspect.measure", &json!({})) else {
-        return (0, 0);
+        return Outcome::default();
     };
     let bodies = boxes(&measured);
-    // Bores already in the design are kept, and nothing new is put close enough to touch one: two markers in the same place
-    // read as one bore and hide each other in the wireframe. Only markers that were there before this pass count. A pass's
-    // own seats are laid out exactly as Ledger lays them out, twins and all: the 48 x 72 table carries two coincident copies
-    // of its outer shell, so its 88 seats stand at 70 distinct points, and dropping a twin would drop a bore the drawing has.
-    let placed: Vec<[f64; 3]> = bodies.iter().filter(|body| body.is_marker()).map(Box3::centre).collect();
-    // Panels are the boards, never the markers: every marker is a 15 mm block, and a block in the list would seam against the
-    // boards it stands in.
-    let panels: Vec<Panel> =
-        bodies.iter().filter(|body| !body.is_marker() && is_board(body)).map(|body| Panel::new(&body.name, body.lo, body.hi)).collect();
+    // Bores already in the design are kept, and they are not boards: a marker in the list would seam against the boards
+    // it stands in. They also decide where the new numbering starts - see below.
+    let existing = bodies.iter().filter(|body| body.is_marker()).count();
+    // A selection narrows the pass to those bodies, which is what a person who picked two panels meant. Nothing selected
+    // is every body in the drawing.
+    let selected: BTreeSet<String> = app
+        .session
+        .selection
+        .iter()
+        .filter_map(|sel| match sel {
+            solidcraft_engine::Sel::Body { name } => Some(name.clone()),
+            _ => None,
+        })
+        .collect();
+    let boards: Vec<Board> = bodies
+        .iter()
+        .filter(|body| !body.is_marker() && (selected.is_empty() || selected.contains(&body.name)))
+        .map(|body| Board {
+            name: body.name.clone(),
+            lo: body.lo,
+            hi: body.hi,
+            // The role a part was assigned in Ledger's parts window comes back through the engine's own rule for now:
+            // the name first, then the box. A stored role is the next step, not this one.
+            role: None,
+            declared_role: None,
+            link: None,
+            hole_txt: None,
+        })
+        .collect();
+    let panels: Vec<Panel> = ledger_holes::translate::panels_from_boards(&boards);
     if panels.len() < 2 {
-        return (0, 0);
+        return Outcome { panels: panels.len(), ..Outcome::default() };
     }
-    let automatic = ledger_joints::automatic(&panels, &ledger_joints::Rules::shop());
+    let run = plan(&panels, &Settings::default());
     // Numbering continues from the bores already in the design: starting again at `cam 1` makes the kernel rename the new
     // bodies to `Body78` and they stop reading as cams at all.
-    let mut cam_number = placed.len();
-    let mut dowel_number = 0usize;
+    let mut cam_number = existing;
     let mut drawn = 0usize;
-    let mut cams = 0usize;
-    /// A carcass has tens of seams. Hundreds means the pairing is wrong, and drawing them would bury the design.
-    const MOST_CAMS: usize = 600;
-    for seat in &automatic.seats {
-        if drawn >= MOST_CAMS {
+    /// A carcass has tens of bores. Hundreds means the pairing is wrong, and drawing them would bury the design.
+    const MOST_MARKERS: usize = 600;
+    for hole in &run.holes {
+        if drawn >= MOST_MARKERS {
             break;
         }
-        // Nudged out along the seam so half of it stands proud of the boards: a marker buried in the joint is a marker
-        // nobody can see.
-        let mut centre = seat.at;
-        for (axis, shift) in centre.iter_mut().zip(seat.axis) {
-            *axis += shift * 9.0;
-        }
-        // Clearance: a bore needs its own space, so a seat closer than this to one already in the design is dropped.
-        const CLEARANCE_MM: f64 = 20.0;
-        let too_close = placed.iter().any(|seen| {
-            let square: f64 = (0..3).map(|axis| (centre[axis] - seen[axis]).powi(2)).sum();
-            square.sqrt() < CLEARANCE_MM
-        });
-        if too_close {
+        let Some(panel) = panels.iter().find(|panel| panel.id == hole.part_id) else {
             continue;
-        }
-        // The cutter's size, and never smaller than the block this button has always drawn.
-        let width = seat.dia.max(15.0);
-        let height = seat.depth.max(14.2);
-        let name = match seat.kind {
-            "cam" => {
-                cam_number += 1;
-                cams += 1;
-                format!("cam {cam_number}")
-            }
-            _ => {
-                dowel_number += 1;
-                format!("dowel {dowel_number}")
-            }
         };
+        cam_number += 1;
+        let name = format!("cam {cam_number}");
+        let centre = hole_at_world(panel, hole);
         let _ = app.session.execute(
             "solid.box",
             &json!({
-                "length": width,
-                "width": width,
-                "height": height,
+                "length": MARKER,
+                "width": MARKER,
+                "height": MARKER_DEEP,
                 "center": centre,
                 "name": name,
                 "body_name": name,
@@ -132,5 +158,13 @@ pub fn calc(app: &mut crate::SolveApp) -> (usize, usize) {
         );
         drawn += 1;
     }
-    (cams, automatic.seams)
+    Outcome {
+        holes: drawn,
+        panels: panels.len(),
+        retried: run.retried,
+        dropped: run.dropped,
+        unbanded: run.unbanded,
+        unported: run.unported,
+        unparsed: run.unparsed,
+    }
 }

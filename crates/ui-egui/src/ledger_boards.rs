@@ -1581,15 +1581,9 @@ fn hardware_panel(app: &mut SolveApp, ui: &egui::Ui, area: Rect, x: f32) -> f32 
     let width = button_width_at(ui, label, 110.0) + 2.0 * INSET;
     let rect = Rect::from_min_size(pos2(x + INSET, top + 2.0), vec2(width - 2.0 * INSET, BUTTON_HEIGHT));
     if ribbon_button_icon(ui, "camlocks", rect, label, false, false, Some("edge_continuity")).clicked() {
-        let (cams, seams) = crate::ledger_cams::calc(app);
-        app.set_status(
-            match (cams, seams) {
-                (0, 0) => "no seams to count - a flat-pack carcass needs two boards meeting".to_owned(),
-                (0, seams) => format!("{seams} seams found, no bore fitted on them"),
-                (cams, seams) => format!("{cams} camlocks marked on {seams} seams"),
-            },
-            false,
-        );
+        // The vendor's own hole engine, over the bodies in the drawing: one block per bore it would drill.
+        let outcome = crate::ledger_cams::calc(app);
+        app.set_status(outcome.message(), false);
     }
     crate::scenario::publish_target("ledger:camlocks", rect);
     group_caption(ui, area, x, width, "Camlocks");

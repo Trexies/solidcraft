@@ -10,6 +10,10 @@ workspace = true
 
 [dependencies]
 solidcraft-engine = { workspace = true }
+# Calc Camlocks runs the vendor's hole engine, the same code Ledger's parts window runs: it lives in its own std-only
+# crate in the Ledger checkout beside this one. A local path on purpose — the fork is a dev integration, and the two
+# are cut from the same shop.
+ledger-holes = { path = "D:/Ledger/crates/ledger-holes" }
 egui = { workspace = true }
 egui-wgpu = { workspace = true }
 solidcraft-gpu = { workspace = true }
