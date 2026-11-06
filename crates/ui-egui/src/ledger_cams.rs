@@ -1,13 +1,15 @@
 //! Counting camlocks from the seams in the model, and drawing a block at each bore.
 //!
-//! This is the pass the shop used to run from Ledger's parts window, moved to where the design is: the seams are worked out from
-//! the panels' own boxes, so a cabinet with fifteen panels and a hundred seams answers in a moment without a round trip.
+//! This is the pass the shop used to run from Ledger's parts window, moved to where the design is. It is Ledger's own seam
+//! model - [`crate::ledger_joints`], a translation of its `src/joints.rs` - run over the bodies the editor has open, so a
+//! cabinet answers the same count here as it does there: two cam bores on a seam, the first 20 mm from its near end and the
+//! last pinned 40 mm from the far one, wherever two boards 12-30 mm thick meet edge to face or edge to edge.
 //!
-//! The rules are the shop's: first bore 20 mm from the end of the seam, then every 32 mm, and the last pinned 40 mm from the far
-//! end; the bore sits 9 mm in from the panel's face. A bore is a `cam` block - orange, the width of the cutter - never a hole in
-//! the panel, because cutting would destroy the drawing.
+//! A bore is a `cam` block - orange, the width of the cutter - never a hole in the panel, because cutting would destroy the
+//! drawing.
 
-use serde_json::{json, Value};
+use crate::ledger_joints::{self, Panel};
+use serde_json::{Value, json};
 
 struct Box3 {
     name: String,
@@ -18,6 +20,15 @@ struct Box3 {
 impl Box3 {
     fn size(&self) -> [f64; 3] {
         [self.hi[0] - self.lo[0], self.hi[1] - self.lo[1], self.hi[2] - self.lo[2]]
+    }
+
+    fn centre(&self) -> [f64; 3] {
+        [(self.lo[0] + self.hi[0]) / 2.0, (self.lo[1] + self.hi[1]) / 2.0, (self.lo[2] + self.hi[2]) / 2.0]
+    }
+
+    /// A bore marker this button put in the design on an earlier click.
+    fn is_marker(&self) -> bool {
+        self.name.starts_with("cam ") || self.name.starts_with("dowel ")
     }
 }
 
@@ -34,10 +45,7 @@ fn boxes(value: &Value) -> Vec<Box3> {
         return out;
     };
     for body in list {
-        let (Some(name), Some(bbox)) = (
-            body.get("name").and_then(Value::as_str),
-            body.get("bbox"),
-        ) else {
+        let (Some(name), Some(bbox)) = (body.get("name").and_then(Value::as_str), body.get("bbox")) else {
             continue;
         };
         let corner = |key: &str| -> Option<[f64; 3]> {
@@ -56,130 +64,73 @@ pub fn calc(app: &mut crate::SolveApp) -> (usize, usize) {
     let Ok(measured) = app.session.execute("inspect.measure", &json!({})) else {
         return (0, 0);
     };
+    let bodies = boxes(&measured);
     // Bores already in the design are kept, and nothing new is put close enough to touch one: two markers in the same place
-    // read as one bore and hide each other in the wireframe.
-    let mut placed: Vec<[f64; 3]> = boxes(&measured)
-        .iter()
-        .filter(|body| body.name.starts_with("cam "))
-        .map(|body| {
-            [
-                (body.lo[0] + body.hi[0]) / 2.0,
-                (body.lo[1] + body.hi[1]) / 2.0,
-                (body.lo[2] + body.hi[2]) / 2.0,
-            ]
-        })
-        .collect();
-    let bodies: Vec<Box3> = boxes(&measured).into_iter().filter(is_board).collect();
-    if bodies.len() < 2 {
+    // read as one bore and hide each other in the wireframe. Only markers that were there before this pass count. A pass's
+    // own seats are laid out exactly as Ledger lays them out, twins and all: the 48 x 72 table carries two coincident copies
+    // of its outer shell, so its 88 seats stand at 70 distinct points, and dropping a twin would drop a bore the drawing has.
+    let placed: Vec<[f64; 3]> = bodies.iter().filter(|body| body.is_marker()).map(Box3::centre).collect();
+    // Panels are the boards, never the markers: every marker is a 15 mm block, and a block in the list would seam against the
+    // boards it stands in.
+    let panels: Vec<Panel> =
+        bodies.iter().filter(|body| !body.is_marker() && is_board(body)).map(|body| Panel::new(&body.name, body.lo, body.hi)).collect();
+    if panels.len() < 2 {
         return (0, 0);
     }
+    let automatic = ledger_joints::automatic(&panels, &ledger_joints::Rules::shop());
+    // Numbering continues from the bores already in the design: starting again at `cam 1` makes the kernel rename the new
+    // bodies to `Body78` and they stop reading as cams at all.
+    let mut cam_number = placed.len();
+    let mut dowel_number = 0usize;
+    let mut drawn = 0usize;
     let mut cams = 0usize;
-    let mut seams = 0usize;
     /// A carcass has tens of seams. Hundreds means the pairing is wrong, and drawing them would bury the design.
     const MOST_CAMS: usize = 600;
-    for a in 0..bodies.len() {
-        for b in (a + 1)..bodies.len() {
-            let (one, two) = (&bodies[a], &bodies[b]);
-            // The seam runs along the axis they share most; they must meet across a different one.
-            let mut shared_axis = 0usize;
-            let mut shared = f64::MIN;
-            for axis in 0..3 {
-                let overlap = one.hi[axis].min(two.hi[axis]) - one.lo[axis].max(two.lo[axis]);
-                if overlap > shared {
-                    shared = overlap;
-                    shared_axis = axis;
-                }
-            }
-            if shared < 60.0 {
-                continue;
-            }
-            // Which axis they meet across: a gap no wider than a hair, and no overlap on that axis.
-            let mut meet = None;
-            for axis in 0..3 {
-                if axis == shared_axis {
-                    continue;
-                }
-                let gap = if one.hi[axis] < two.lo[axis] {
-                    two.lo[axis] - one.hi[axis]
-                } else if two.hi[axis] < one.lo[axis] {
-                    one.lo[axis] - two.hi[axis]
-                } else {
-                    0.0
-                };
-                let overlap = one.hi[axis].min(two.hi[axis]) - one.lo[axis].max(two.lo[axis]);
-                // **Edge to face, not face to face.** Two boards whose faces lie on each other are a doubled panel, not a
-                // joint; a real seam has the end of one board (its thickness, at most) meeting the other's face. Without this
-                // the pass counted every overlapping pair and drew thousands of bores.
-                if (0.0..=1.0).contains(&gap) && overlap > 0.0 && overlap <= 45.0 {
-                    meet = Some(axis);
-                    break;
-                }
-            }
-            let Some(meet) = meet else { continue };
-            seams += 1;
-            // The seam's own line: where the two boxes agree on the meeting axis.
-            let plane = (one.hi[meet] + two.lo[meet]) / 2.0;
-            let start = one.lo[shared_axis].max(two.lo[shared_axis]);
-            let end = one.hi[shared_axis].min(two.hi[shared_axis]);
-            let length = end - start;
-            let mut at = if length <= 20.0 + 40.0 {
-                vec![start + length / 2.0]
-            } else {
-                let mut spots = Vec::new();
-                let mut position = 20.0;
-                while position <= length - 40.0 {
-                    spots.push(start + position);
-                    position += 32.0;
-                }
-                spots.push(end - 40.0);
-                spots
-            };
-            at.sort_by(f64::total_cmp);
-            at.dedup_by(|x, y| (*x - *y).abs() < 1.0);
-            // The other axis of the seam is the panel's own face; the bore sits 9 mm in from it.
-            let across_axis = 3 - shared_axis - meet;
-            let face = if one.size()[across_axis] < two.size()[across_axis] {
-                one.lo[across_axis] + 9.0
-            } else {
-                two.lo[across_axis] + 9.0
-            };
-            if cams >= MOST_CAMS {
-                return (cams, seams);
-            }
-            for position in at {
-                let mut centre = [0.0f64; 3];
-                centre[shared_axis] = position;
-                centre[meet] = plane;
-                centre[across_axis] = face;
-                // Clearance: a bore needs its own space, so a seat closer than this to one already placed is dropped.
-                const CLEARANCE_MM: f64 = 20.0;
-                let too_close = placed.iter().any(|seen| {
-                    let mut square = 0.0;
-                    for axis in 0..3 {
-                        let gap = centre[axis] - seen[axis];
-                        square += gap * gap;
-                    }
-                    square.sqrt() < CLEARANCE_MM
-                });
-                if too_close {
-                    continue;
-                }
-                placed.push(centre);
-                cams += 1;
-                let name = format!("cam {cams}");
-                let _ = app.session.execute(
-                    "solid.box",
-                    &json!({
-                        "length": 15.0,
-                        "width": 15.0,
-                        "height": 14.2,
-                        "center": centre,
-                        "name": name,
-                        "body_name": name,
-                    }),
-                );
-            }
+    for seat in &automatic.seats {
+        if drawn >= MOST_CAMS {
+            break;
         }
+        // Nudged out along the seam so half of it stands proud of the boards: a marker buried in the joint is a marker
+        // nobody can see.
+        let mut centre = seat.at;
+        for (axis, shift) in centre.iter_mut().zip(seat.axis) {
+            *axis += shift * 9.0;
+        }
+        // Clearance: a bore needs its own space, so a seat closer than this to one already in the design is dropped.
+        const CLEARANCE_MM: f64 = 20.0;
+        let too_close = placed.iter().any(|seen| {
+            let square: f64 = (0..3).map(|axis| (centre[axis] - seen[axis]).powi(2)).sum();
+            square.sqrt() < CLEARANCE_MM
+        });
+        if too_close {
+            continue;
+        }
+        // The cutter's size, and never smaller than the block this button has always drawn.
+        let width = seat.dia.max(15.0);
+        let height = seat.depth.max(14.2);
+        let name = match seat.kind {
+            "cam" => {
+                cam_number += 1;
+                cams += 1;
+                format!("cam {cam_number}")
+            }
+            _ => {
+                dowel_number += 1;
+                format!("dowel {dowel_number}")
+            }
+        };
+        let _ = app.session.execute(
+            "solid.box",
+            &json!({
+                "length": width,
+                "width": width,
+                "height": height,
+                "center": centre,
+                "name": name,
+                "body_name": name,
+            }),
+        );
+        drawn += 1;
     }
-    (cams, seams)
+    (cams, automatic.seams)
 }

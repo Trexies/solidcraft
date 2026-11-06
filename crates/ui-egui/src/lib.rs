@@ -104,6 +104,7 @@ pub mod keymap;
 pub mod ledger_boards;
 pub mod ledger_cams;
 pub mod ledger_edgeband;
+pub(crate) mod ledger_joints;
 pub mod ledger_naming;
 mod length_input;
 mod linked_source;
