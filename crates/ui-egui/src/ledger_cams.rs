@@ -48,8 +48,17 @@
 //! else — a cabinet, a table, an island, or no file at all — keeps the vendor's tables, which is what this button did
 //! before. The status line names the rule set, so a count that changed can be traced to the decision rather than
 //! looking like the button miscounting.
+//!
+//! # The desk's modesty is declared, not guessed
+//!
+//! The desk standard is keyed by *part* (top, side, modesty), and the shop's imported STEP calls every body
+//! `Part (n)` — nothing in the drawing says which one is the modesty. The owner says it in Ledger's parts window, and
+//! that answer travels in `current.json` as `"parts": [{"name": "Part (4)", "role": "modesty"}, …]`; this pass puts
+//! the role on the matching board and the standard declares those joints, with no geometry test at all. Only when no
+//! part carries a role does the old geometric fallback run — the one plate meeting both sides and the top — and the
+//! status line says which of the two answered, or that neither could.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use ledger_holes::construction::{declare_desk_links, desk_declarations, Construction};
 use ledger_holes::translate::{translate_boards, Board, Role};
@@ -225,6 +234,9 @@ pub fn calc(app: &mut crate::SolveApp) -> Outcome {
             _ => None,
         })
         .collect();
+    let current = current();
+    // The roles Ledger publishes are the owner's word; a part nobody spoke about carries none and the rule decides.
+    let declared_roles = current.as_ref().map(|current| &current.roles);
     let boards: Vec<Board> = bodies
         .iter()
         .filter(|body| !body.is_marker() && (selected.is_empty() || selected.contains(&body.name)))
@@ -232,10 +244,10 @@ pub fn calc(app: &mut crate::SolveApp) -> Outcome {
             name: body.name.clone(),
             lo: body.lo,
             hi: body.hi,
-            // The role a part was assigned in Ledger's parts window comes back through the engine's own rule for now:
-            // the name first, then the box. A stored role is the next step, not this one.
             role: None,
-            declared_role: None,
+            // The word the parts window stored, matched by the body name Ledger published it under. `None` is
+            // Automatic: the rule reads the name first, then the box, exactly as before.
+            declared_role: declared_roles.and_then(|roles| roles.get(&body.name).copied()),
             link: None,
             hole_txt: None,
         })
@@ -245,7 +257,9 @@ pub fn calc(app: &mut crate::SolveApp) -> Outcome {
     if panels.len() < 2 {
         return Outcome { panels: panels.len(), ..Outcome::default() };
     }
-    let (run, standard, rule) = drill(&mut panels, &translation.roles);
+    let construction = current.as_ref().and_then(|current| current.construction);
+    let assigned = current.as_ref().is_some_and(|current| !current.roles.is_empty());
+    let (run, standard, rule) = drill(&mut panels, &translation.roles, construction, assigned);
     let mut drawn = 0usize;
     /// A carcass has tens of bores. Hundreds means the pairing is wrong, and drawing them would bury the design.
     const MOST_MARKERS: usize = 600;
@@ -344,33 +358,63 @@ pub fn calc(app: &mut crate::SolveApp) -> Outcome {
 /// thing that turns the SOL-DKS drawing's four cams into the eleven the BOM calls for. Everything else (a cabinet, a
 /// table, an island, or no construction at all — an editor started on its own) keeps the vendor's count tables, byte
 /// for byte as before.
-fn drill(panels: &mut [Panel], roles: &[Role]) -> (Plan, Option<&'static str>, String) {
-    let Some(standard) = construction().and_then(Construction::standard) else {
+///
+/// `assigned` is whether any part carried a role from the parts window. The geometric modesty fallback is only for a
+/// drawing where nobody has said what anything is; once the owner has assigned roles, a missing modesty is a missing
+/// answer, not an invitation to guess.
+fn drill(
+    panels: &mut [Panel],
+    roles: &[Role],
+    construction: Option<Construction>,
+    assigned: bool,
+) -> (Plan, Option<&'static str>, String) {
+    let Some(standard) = construction.and_then(Construction::standard) else {
         return (plan(panels, &Settings::default()), None, String::new());
     };
-    run_with(panels, roles, standard)
+    run_with(panels, roles, standard, assigned)
 }
 
 /// The standard's run, and what a reader must know about the parts it was given.
 ///
-/// The parts are read by [`desk_declarations`] — the board's own name first (`Top`, `Side - left`, `Full Modesty`),
-/// then the role the translation read. The shop's imported drawings do not use those names: the STEP calls the
-/// desk's modesty `panel - front` (the importer's word for a front-to-back panel), so the standard cannot name it,
-/// and without it the desk is drilled by the four side-to-top joints alone. That board is found the way the BOM
-/// describes the desk: it is the one plate that meets **both** sides and the top, and only when exactly one does.
-fn run_with(panels: &mut [Panel], roles: &[Role], standard: &'static Standard) -> (Plan, Option<&'static str>, String) {
+/// The parts are read by [`desk_declarations`]: the role the shop assigned first (a part recorded as `modesty` *is*
+/// the modesty, with no geometry test), then the board's own name (`Top`, `Side - left`, `Full Modesty`). When no
+/// part carries a role at all, the desk's modesty is found the way the BOM describes it — the one plate that meets
+/// **both** sides and the top, and only when exactly one does. Whichever path answered is named on the status line.
+fn run_with(
+    panels: &mut [Panel],
+    roles: &[Role],
+    standard: &'static Standard,
+    assigned: bool,
+) -> (Plan, Option<&'static str>, String) {
     let mut declared: Vec<Declared> = desk_declarations(panels, roles);
-    let mut note = String::new();
-    if !declared.iter().any(|entry| entry.part == DeskPart::Modesty) {
+    let name_of = |id: u32| -> String {
+        panels
+            .iter()
+            .find(|panel| panel.id == id)
+            .map(|panel| panel.name.clone())
+            .unwrap_or_default()
+    };
+    let note = if let Some(entry) = declared.iter().find(|entry| entry.part == DeskPart::Modesty) {
+        // The standard named a modesty: say whether the owner's word did it or the part's name, because a name is
+        // not a promise the drawing will keep and the word is.
+        let by_role = roles
+            .get((entry.panel as usize).saturating_sub(1))
+            .copied()
+            == Some(Role::Modesty);
+        let source = if by_role { "role" } else { "name" };
+        format!("modesty `{}` ({source})", name_of(entry.panel))
+    } else if assigned {
+        "no modesty panel could be named".to_owned()
+    } else {
         match modesty(panels, &declared) {
             Some(id) => {
-                let name = panels.iter().find(|panel| panel.id == id).map(|panel| panel.name.clone()).unwrap_or_default();
+                let name = name_of(id);
                 declared.push(Declared::new(id, DeskPart::Modesty));
-                note = format!("modesty `{name}`");
+                format!("modesty `{name}` (geometric)")
             }
-            None => note = "no modesty panel could be named".to_owned(),
+            None => "no modesty panel could be named".to_owned(),
         }
-    }
+    };
     // The modesty's contact set is one no vendor string spells, so its joints only exist once the standard gives it
     // the shop's `固定` where the drawing left it undecided.
     declare_desk_links(panels, &declared);
@@ -378,18 +422,46 @@ fn run_with(panels: &mut [Panel], roles: &[Role], standard: &'static Standard) -
     (run, Some(standard.name), note)
 }
 
-/// What the item is, from Ledger's `current.json` beside the boards: the word the owner set on the item.
+/// What Ledger says about the item the editor was opened for.
 ///
-/// The file belongs to Ledger, not to the editor, and it is only a hint: absent, half written, carrying another
-/// format marker or a word the shop does not use all mean "no construction" — the vendor's tables, which is today's
+/// `current.json` belongs to Ledger, not to the editor, and it is only a hint: absent, half written, carrying another
+/// format marker or a word the shop does not use all mean "nothing declared" — the vendor's tables, which is today's
 /// behaviour. Nothing here may fail a pass or block the UI over a file the operator never sees.
-fn construction() -> Option<Construction> {
-    let text = std::fs::read_to_string(crate::ledger_boards::file().with_file_name("current.json")).ok()?;
+#[derive(Debug, Default)]
+struct Current {
+    /// `desk`, `table`, … — the word the owner set on the item (or the SKU gave it).
+    construction: Option<Construction>,
+    /// The role each part was assigned, by the body name Ledger published it under. An automatic part is absent.
+    roles: BTreeMap<String, Role>,
+}
+
+fn current() -> Option<Current> {
+    let text =
+        std::fs::read_to_string(crate::ledger_boards::file().with_file_name("current.json")).ok()?;
     let value: Value = serde_json::from_str(&text).ok()?;
     if value.get("format").and_then(Value::as_str) != Some("ledger-current/1") {
         return None;
     }
-    Construction::from_token(value.get("construction").and_then(Value::as_str)?)
+    let mut roles = BTreeMap::new();
+    for part in value.get("parts").and_then(Value::as_array).into_iter().flatten() {
+        let (Some(name), Some(role)) = (
+            part.get("name").and_then(Value::as_str),
+            part.get("role").and_then(Value::as_str),
+        ) else {
+            continue;
+        };
+        // A word this build does not know is ignored, not turned into a guess.
+        if let Some(role) = Role::from_token(role) {
+            roles.insert(name.to_owned(), role);
+        }
+    }
+    Some(Current {
+        construction: value
+            .get("construction")
+            .and_then(Value::as_str)
+            .and_then(Construction::from_token),
+        roles,
+    })
 }
 
 /// Two boxes are within this distance of each other on every axis: a joint, or a hairline gap the export left.
