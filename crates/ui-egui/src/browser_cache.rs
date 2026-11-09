@@ -30,6 +30,15 @@ pub(super) struct Group {
     pub key: String,
     pub label: String,
     pub items: Vec<Entry>,
+    /// The groups nested inside this one, in the folder's order.
+    pub children: Vec<Group>,
+}
+
+impl Group {
+    /// This group's items and everything its nested groups hold.
+    pub fn entries(&self) -> Box<dyn Iterator<Item = &Entry> + '_> {
+        Box::new(self.items.iter().chain(self.children.iter().flat_map(|g| g.entries())))
+    }
 }
 
 #[derive(Default)]
@@ -41,8 +50,8 @@ pub(super) struct Folder {
 }
 
 impl Folder {
-    pub fn entries(&self) -> impl Iterator<Item = &Entry> {
-        self.groups.iter().flat_map(|g| &g.items).chain(&self.loose)
+    pub fn entries(&self) -> Box<dyn Iterator<Item = &Entry> + '_> {
+        Box::new(self.groups.iter().flat_map(|g| g.entries()).chain(&self.loose))
     }
 }
 
@@ -192,14 +201,14 @@ impl Cache {
         }
         let (groups, loose) = arrange(&doc, component, folder, all);
         let loose_keys = loose.iter().map(|e| e.key.clone()).collect();
-        let groups = groups
-            .into_iter()
-            .map(|(group, items)| {
-                let key = format!("{prefix}/g{}", group.id);
-                let label = format!("{} ({})", group.name, items.len());
-                Group { id: group.id, key, label, items }
-            })
-            .collect();
+        fn convert(prefix: &str, node: Arranged<'_>) -> Group {
+            let children: Vec<Group> = node.children.into_iter().map(|child| convert(prefix, child)).collect();
+            let key = format!("{prefix}/g{}", node.group.id);
+            let total = node.items.len() + children.iter().map(|c| c.entries().count()).sum::<usize>();
+            let label = format!("{} ({total})", node.group.name);
+            Group { id: node.group.id, key, label, items: node.items, children }
+        }
+        let groups: Vec<Group> = groups.into_iter().map(|node| convert(&prefix, node)).collect();
         Folder { key: format!("{prefix}/{folder}"), groups, loose, loose_keys }
     }
 }

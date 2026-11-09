@@ -580,10 +580,23 @@ impl Session {
         }
         self.folder_hidden(&format!("{scope}/{folder}"))
             || self.doc.browser_groups.iter().any(|g| {
-                g.component == component
-                    && g.folder == folder
-                    && g.items.iter().any(|i| i == item)
-                    && self.folder_hidden(&format!("{scope}/g{}", g.id))
+                if g.component != component || g.folder != folder || !g.items.iter().any(|i| i == item) {
+                    return false;
+                }
+                // A group and everything it is nested in, so hiding `Hardware` hides `Cams` too.
+                let mut current = Some(g.id);
+                let mut steps = 0usize;
+                while let Some(id) = current {
+                    if self.folder_hidden(&format!("{scope}/g{id}")) {
+                        return true;
+                    }
+                    steps += 1;
+                    if steps > self.doc.browser_groups.len() {
+                        return false;
+                    }
+                    current = self.doc.browser_groups.iter().find(|candidate| candidate.id == id).and_then(|candidate| candidate.parent);
+                }
+                false
             })
     }
 

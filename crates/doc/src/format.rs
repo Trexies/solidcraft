@@ -756,6 +756,25 @@ pub fn read(s: &str) -> Result<Document> {
     if let Some(id) = crate::non_contiguous_timeline_group(&d.features, &d.timeline_groups) {
         return Err(DocError::Invalid(format!("damaged design: timeline folder {id} is not contiguous")));
     }
+    let browser_ids: std::collections::BTreeSet<_> = d.browser_groups.iter().map(|group| group.id).collect();
+    if browser_ids.len() != d.browser_groups.len()
+        || d.browser_groups.iter().any(|group| group.name.trim().is_empty() || group.name.len() > 128)
+    {
+        return Err(DocError::Invalid("damaged design: invalid browser group".into()));
+    }
+    for group in &d.browser_groups {
+        let mut seen = std::collections::BTreeSet::new();
+        let mut current = group.parent;
+        while let Some(id) = current {
+            if !seen.insert(id) {
+                return Err(DocError::Invalid("damaged design: cyclic browser groups".into()));
+            }
+            match d.browser_groups.iter().find(|candidate| candidate.id == id) {
+                Some(parent) if parent.component == group.component && parent.folder == group.folder => current = parent.parent,
+                _ => return Err(DocError::Invalid("damaged design: a browser group's parent is not a group of its folder".into())),
+            }
+        }
+    }
     for o in &d.occurrences {
         if !rigid(&o.transform) {
             return Err(DocError::Invalid(format!("damaged design: occurrence `{}` has an invalid placement", o.name)));

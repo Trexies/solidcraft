@@ -28,16 +28,42 @@
 //! showed no marks at all, and the ones beside it belonged to the rails and legs underneath. Nothing the engine returned
 //! changes; the status line states the bores, the fittings and the stations so the three numbers can never be mistaken
 //! for each other.
+//!
+//! # The tree: one `Hardware` folder, one folder per kind
+//!
+//! What the pass draws is hardware, so it is filed as hardware: every marker lands in a browser folder `Hardware`, and
+//! inside it a folder per kind — `Cams`, `Dowels`, `Holes` (a shelf pin's bore is a plain hole). The tree then reads
+//! `Bodies › Hardware › Cams`, and the fifty-odd `cam N` rows are one row that folds away, instead of a flat list the
+//! panel has to be scrolled through. The folders are design objects (`browser.group`), so they save with the design and
+//! undo like any other change. A pass starts by clearing what an earlier pass left — the `cam`/`dowel`/`pin` bodies
+//! *and* their folders, wherever in the tree they now sit — so pressing the button twice redraws one set, never two,
+//! and never leaves a stale `Hardware` behind.
+//!
+//! # Which rule set drills the drawing
+//!
+//! The count comes from `ledger-holes`, and that crate has two rule sets: the vendor's count tables, which drill a
+//! 1153 mm seam with four cams, and the shop's **SOL-DKS desk standard**, which drills the desk with eleven because the
+//! BOM says eleven. Which one runs is the *item's* answer, not the drawing's: Ledger writes the item it opened into
+//! `current.json` beside `boards.json`, and an item whose `construction` is `desk` gets the desk standard. Everything
+//! else — a cabinet, a table, an island, or no file at all — keeps the vendor's tables, which is what this button did
+//! before. The status line names the rule set, so a count that changed can be traced to the decision rather than
+//! looking like the button miscounting.
 
 use std::collections::BTreeSet;
 
-use ledger_holes::translate::Board;
-use ledger_holes::{Fastener, Hole, Panel, Settings, hole_at_world, plan, station_anchor};
+use ledger_holes::construction::{declare_desk_links, desk_declarations, Construction};
+use ledger_holes::translate::{translate_boards, Board, Role};
+use ledger_holes::{
+    hole_at_world, plan, plan_with_standard, station_anchor, Declared, DeskPart, Fastener, Hole, Panel, Plan, Settings,
+    Standard,
+};
 use serde_json::{Value, json};
 
 /// The cam cup's cutter: the block this button has always drawn, wherever it now stands.
 const MARKER: f64 = 15.0;
 const MARKER_DEEP: f64 = 14.2;
+/// The tree folder every marker is filed under; each kind gets its own folder inside it.
+const HARDWARE: &str = "Hardware";
 
 struct Box3 {
     name: String,
@@ -48,7 +74,21 @@ struct Box3 {
 impl Box3 {
     /// A bore marker this button put in the design on an earlier click.
     fn is_marker(&self) -> bool {
-        self.name.starts_with("cam ") || self.name.starts_with("dowel ")
+        is_marker_name(&self.name)
+    }
+}
+
+/// Whether a body name is one this pass writes: `cam 7`, `dowel 2`, `pin 1`.
+fn is_marker_name(name: &str) -> bool {
+    name.starts_with("cam ") || name.starts_with("dowel ") || name.starts_with("pin ")
+}
+
+/// The folder a kind of fastener is filed in, and the word its markers are numbered from.
+fn family(fastener: Fastener) -> (&'static str, &'static str) {
+    match fastener {
+        Fastener::Cam => ("Cams", "cam"),
+        Fastener::Dowel => ("Dowels", "dowel"),
+        Fastener::ShelfPin => ("Holes", "pin"),
     }
 }
 
@@ -81,7 +121,7 @@ struct Station {
 }
 
 /// What one pass did: what it drew, and the engine's own account of the run.
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Default, Clone)]
 pub struct Outcome {
     /// Bores the engine returned — every side of every joint, so a cam counts its bolt, its cup and its ⌀10 mate.
     pub holes: usize,
@@ -107,6 +147,12 @@ pub struct Outcome {
     pub unported: usize,
     /// Positions a `自定义` hole string spelled but could not be parsed.
     pub unparsed: usize,
+    /// The shop standard that drilled this run, by name. `None` is the vendor's count tables — what every run
+    /// before a construction existed did, and what an item with no construction still gets.
+    pub standard: Option<&'static str>,
+    /// The one thing a reader of the count needs to know about the standard, stated by the pass: which board it
+    /// had to take for the desk's modesty, or that it could not name one. Empty when nothing needed saying.
+    pub rule: String,
 }
 
 /// `0 camlocks`, `1 camlock`, `46 camlocks` — the shop's plural, not a naive `s`.
@@ -136,9 +182,18 @@ impl Outcome {
             fittings.push_str(&format!(" and {}", plural(self.pins, "shelf pin")));
         }
         let short = if self.drawn == self.stations { String::new() } else { format!(", {} markers drawn", self.drawn) };
+        // Which rule set drilled this run, and the one thing about it a reader of the count needs: "eleven, not
+        // four" is the same drawing under a different rule, so the rule has to be on the line.
+        let mut rule = match self.standard {
+            Some(standard) => format!("; rule set {standard}"),
+            None => String::new(),
+        };
+        if !self.rule.is_empty() {
+            rule.push_str(&format!("; {}", self.rule));
+        }
         format!(
-            "{} at {} stations ({} holes{}; engine: retried {}, dropped {}, unbanded {}, unported {}, unparsed {})",
-            fittings, self.stations, self.holes, short, self.retried, self.dropped, self.unbanded, self.unported, self.unparsed
+            "{} at {} stations ({} holes{}{}; engine: retried {}, dropped {}, unbanded {}, unported {}, unparsed {})",
+            fittings, self.stations, self.holes, short, rule, self.retried, self.dropped, self.unbanded, self.unported, self.unparsed
         )
     }
 }
@@ -150,9 +205,15 @@ pub fn calc(app: &mut crate::SolveApp) -> Outcome {
         return Outcome::default();
     };
     let bodies = boxes(&measured);
-    // Bores already in the design are kept, and they are not boards: a marker in the list would seam against the boards
-    // it stands in. They also decide where the new numbering starts - see below.
-    let existing = bodies.iter().filter(|body| body.is_marker()).count();
+    // What an earlier click drew is cleared first: a second press redraws the marks, it never adds a second set on top
+    // of the first (88 marks had piled up in the 48x72 that way, and every one of them was still listed in the tree).
+    let earlier: Vec<String> = bodies.iter().filter(|body| body.is_marker()).map(|body| body.name.clone()).collect();
+    if !earlier.is_empty() {
+        let _ = app.session.execute("solid.remove", &json!({ "bodies": earlier }));
+    }
+    // The folders go whether or not bodies were left behind: a pass whose markers were deleted by hand, or undone,
+    // leaves its `Hardware` standing, and a second one beside it is exactly the stacking this pass must never make.
+    clear_folders(app);
     // A selection narrows the pass to those bodies, which is what a person who picked two panels meant. Nothing selected
     // is every body in the drawing.
     let selected: BTreeSet<String> = app
@@ -179,14 +240,12 @@ pub fn calc(app: &mut crate::SolveApp) -> Outcome {
             hole_txt: None,
         })
         .collect();
-    let panels: Vec<Panel> = ledger_holes::translate::panels_from_boards(&boards);
+    let mut translation = translate_boards(&boards);
+    let mut panels = std::mem::take(&mut translation.panels);
     if panels.len() < 2 {
         return Outcome { panels: panels.len(), ..Outcome::default() };
     }
-    let run = plan(&panels, &Settings::default());
-    // Numbering continues from the bores already in the design: starting again at `cam 1` makes the kernel rename the new
-    // bodies to `Body78` and they stop reading as cams at all.
-    let mut cam_number = existing;
+    let (run, standard, rule) = drill(&mut panels, &translation.roles);
     let mut drawn = 0usize;
     /// A carcass has tens of bores. Hundreds means the pairing is wrong, and drawing them would bury the design.
     const MOST_MARKERS: usize = 600;
@@ -223,13 +282,17 @@ pub fn calc(app: &mut crate::SolveApp) -> Outcome {
         station.fastener = anchor.kind.fastener();
     }
 
+    let mut filed: std::collections::BTreeMap<&'static str, Vec<String>> = std::collections::BTreeMap::new();
+    let mut numbers: std::collections::BTreeMap<&'static str, usize> = std::collections::BTreeMap::new();
     for station in &stations {
         if drawn >= MOST_MARKERS {
             break;
         }
-        cam_number += 1;
-        let name = format!("cam {cam_number}");
-        let _ = app.session.execute(
+        let (folder, word) = family(station.fastener);
+        let number = numbers.entry(word).or_insert(0);
+        *number += 1;
+        let name = format!("{word} {number}");
+        let made = app.session.execute(
             "solid.box",
             &json!({
                 "length": MARKER,
@@ -240,8 +303,21 @@ pub fn calc(app: &mut crate::SolveApp) -> Outcome {
                 "body_name": name,
             }),
         );
+        // Only what the kernel actually made is filed: a refused box must not leave a name in a folder, and a name the
+        // kernel had to change must be filed under the name the tree now shows, or the folder points at nothing.
+        let Ok(made) = made else { continue };
+        let created: Vec<String> = made
+            .get("created_bodies")
+            .and_then(Value::as_array)
+            .map(|list| list.iter().filter_map(Value::as_str).map(str::to_owned).collect())
+            .unwrap_or_else(|| vec![name]);
+        if created.is_empty() {
+            continue;
+        }
+        filed.entry(folder).or_default().extend(created);
         drawn += 1;
     }
+    file_under_hardware(app, &filed);
     let count = |fastener: Fastener| stations.iter().filter(|station| station.fastener == fastener).count();
     Outcome {
         holes: run.holes.len(),
@@ -256,5 +332,172 @@ pub fn calc(app: &mut crate::SolveApp) -> Outcome {
         unbanded: run.unbanded,
         unported: run.unported,
         unparsed: run.unparsed,
+        standard,
+        rule,
+    }
+}
+
+/// The engine's run over the drawing, with the item's **construction** choosing the rule set.
+///
+/// The boards say what each part is; Ledger's `current.json` — the item the editor was opened for — says what the
+/// whole item is. A desk selects the shop's [`ledger_holes::table_rules::DKS_DESK`] standard, and that is the only
+/// thing that turns the SOL-DKS drawing's four cams into the eleven the BOM calls for. Everything else (a cabinet, a
+/// table, an island, or no construction at all — an editor started on its own) keeps the vendor's count tables, byte
+/// for byte as before.
+fn drill(panels: &mut [Panel], roles: &[Role]) -> (Plan, Option<&'static str>, String) {
+    let Some(standard) = construction().and_then(Construction::standard) else {
+        return (plan(panels, &Settings::default()), None, String::new());
+    };
+    run_with(panels, roles, standard)
+}
+
+/// The standard's run, and what a reader must know about the parts it was given.
+///
+/// The parts are read by [`desk_declarations`] — the board's own name first (`Top`, `Side - left`, `Full Modesty`),
+/// then the role the translation read. The shop's imported drawings do not use those names: the STEP calls the
+/// desk's modesty `panel - front` (the importer's word for a front-to-back panel), so the standard cannot name it,
+/// and without it the desk is drilled by the four side-to-top joints alone. That board is found the way the BOM
+/// describes the desk: it is the one plate that meets **both** sides and the top, and only when exactly one does.
+fn run_with(panels: &mut [Panel], roles: &[Role], standard: &'static Standard) -> (Plan, Option<&'static str>, String) {
+    let mut declared: Vec<Declared> = desk_declarations(panels, roles);
+    let mut note = String::new();
+    if !declared.iter().any(|entry| entry.part == DeskPart::Modesty) {
+        match modesty(panels, &declared) {
+            Some(id) => {
+                let name = panels.iter().find(|panel| panel.id == id).map(|panel| panel.name.clone()).unwrap_or_default();
+                declared.push(Declared::new(id, DeskPart::Modesty));
+                note = format!("modesty `{name}`");
+            }
+            None => note = "no modesty panel could be named".to_owned(),
+        }
+    }
+    // The modesty's contact set is one no vendor string spells, so its joints only exist once the standard gives it
+    // the shop's `固定` where the drawing left it undecided.
+    declare_desk_links(panels, &declared);
+    let run = plan_with_standard(panels, &Settings::default(), standard, &declared);
+    (run, Some(standard.name), note)
+}
+
+/// What the item is, from Ledger's `current.json` beside the boards: the word the owner set on the item.
+///
+/// The file belongs to Ledger, not to the editor, and it is only a hint: absent, half written, carrying another
+/// format marker or a word the shop does not use all mean "no construction" — the vendor's tables, which is today's
+/// behaviour. Nothing here may fail a pass or block the UI over a file the operator never sees.
+fn construction() -> Option<Construction> {
+    let text = std::fs::read_to_string(crate::ledger_boards::file().with_file_name("current.json")).ok()?;
+    let value: Value = serde_json::from_str(&text).ok()?;
+    if value.get("format").and_then(Value::as_str) != Some("ledger-current/1") {
+        return None;
+    }
+    Construction::from_token(value.get("construction").and_then(Value::as_str)?)
+}
+
+/// Two boxes are within this distance of each other on every axis: a joint, or a hairline gap the export left.
+const TOUCH: f64 = 1.0;
+
+/// A panel's world box, from its own frame and extents — the geometry the engine drills, not the body it came from.
+fn extent(panel: &Panel) -> ([f64; 3], [f64; 3]) {
+    let mut lo = [f64::MAX; 3];
+    let mut hi = [f64::MIN; 3];
+    for sx in [-0.5, 0.5] {
+        for sy in [-0.5, 0.5] {
+            for sz in [-0.5, 0.5] {
+                let at = panel.frame.to_world([sx * panel.width, sy * panel.height, sz * panel.thickness]);
+                for i in 0..3 {
+                    lo[i] = lo[i].min(at[i]);
+                    hi[i] = hi[i].max(at[i]);
+                }
+            }
+        }
+    }
+    (lo, hi)
+}
+
+/// Whether two boards meet: their boxes overlap, or are within [`TOUCH`] of each other, on all three axes.
+fn meet(a: &([f64; 3], [f64; 3]), b: &([f64; 3], [f64; 3])) -> bool {
+    (0..3).all(|i| a.0[i] <= b.1[i] + TOUCH && b.0[i] <= a.1[i] + TOUCH)
+}
+
+/// The desk's modesty, when no board's name says which one it is: the one undeclared plate that meets both sides
+/// **and** the top.
+///
+/// The SOL-DKS BOM is one top, two sides and one modesty, and the standard's eleven cams are the modesty's three
+/// joints plus the sides' four — so the board under the top, spanning between the two ends, *is* the modesty of the
+/// desk the construction says this is. Exactly one, or none: two candidates means a carcass with a back panel as
+/// well, and there the guess would be the mistake, so the standard is simply not applied to either and the status
+/// line says it could not name one.
+fn modesty(panels: &[Panel], declared: &[Declared]) -> Option<u32> {
+    let boxes = |part: DeskPart| -> Vec<([f64; 3], [f64; 3])> {
+        declared
+            .iter()
+            .filter(|entry| entry.part == part)
+            .filter_map(|entry| panels.iter().find(|panel| panel.id == entry.panel))
+            .map(extent)
+            .collect()
+    };
+    let tops = boxes(DeskPart::Top);
+    let sides = boxes(DeskPart::Side);
+    if tops.is_empty() || sides.len() < 2 {
+        return None;
+    }
+    let found: Vec<u32> = panels
+        .iter()
+        .filter(|panel| !declared.iter().any(|entry| entry.panel == panel.id))
+        .filter(|panel| {
+            let board = extent(panel);
+            sides.iter().all(|side| meet(&board, side)) && tops.iter().any(|top| meet(&board, top))
+        })
+        .map(|panel| panel.id)
+        .collect();
+    (found.len() == 1).then(|| found[0])
+}
+
+/// Whether a browser group is one this pass owns: `Hardware` itself, or a kind folder inside it, **and** holding
+/// nothing but this pass's own markers. A folder the operator made and named `Cams` is theirs, and is left alone.
+fn is_hardware_folder(group: &solidcraft_engine::doc::BrowserGroup) -> bool {
+    let named = group.name == HARDWARE || [Fastener::Cam, Fastener::Dowel, Fastener::ShelfPin].iter().any(|f| family(*f).0 == group.name);
+    named && group.items.iter().all(|item| is_marker_name(item))
+}
+
+/// Remove the folders an earlier pass made, so a re-run never stacks a second `Hardware` beside the first. Every folder
+/// of the set is removed in its own right: ungrouping a parent moves its children **up into its place**, so a child left
+/// out of the list would survive as a stray `Cams` at the folder's own level.
+fn clear_folders(app: &mut crate::SolveApp) {
+    let component = app.session.active_component;
+    let ids: Vec<u64> = app
+        .session
+        .doc
+        .browser_groups
+        .iter()
+        .filter(|g| g.component == component && g.folder == "bodies" && is_hardware_folder(g))
+        .map(|g| g.id)
+        .collect();
+    // A parent first would leave its kind folders to be swept too; either order ends with none of them standing.
+    for id in ids {
+        let _ = app.session.execute("browser.ungroup", &json!({ "group": id }));
+    }
+}
+
+/// File what the pass drew: one `Hardware` folder in the drawing's Bodies, and a folder per kind nested inside it.
+///
+/// `browser.group` is the editor's own browser-folder command, so the folders are saved in the design and undone like
+/// any other change; a group is keyed by body name, which is exactly what the markers are called. A kind with nothing
+/// in it gets no folder — an empty `Holes (0)` row would be clutter pretending to be hardware.
+fn file_under_hardware(app: &mut crate::SolveApp, filed: &std::collections::BTreeMap<&'static str, Vec<String>>) {
+    if filed.is_empty() {
+        return;
+    }
+    let component = app.session.active_component;
+    let Ok(hardware) = app.session.execute("browser.group", &json!({ "folder": "bodies", "component": component, "name": HARDWARE })) else {
+        return;
+    };
+    let Some(parent) = hardware.get("group").and_then(Value::as_u64) else {
+        return;
+    };
+    for (folder, names) in filed {
+        let _ = app.session.execute(
+            "browser.group",
+            &json!({ "folder": "bodies", "component": component, "name": folder, "parent": parent, "items": names }),
+        );
     }
 }

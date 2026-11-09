@@ -24,8 +24,8 @@ pub static COMMANDS: &[CommandSpec] = &[
         .params("sketch: id or name; plane: as sketch.create; frame?: as sketch.create; author_path?: exact owner occurrence ids; explicitly rebinds or freezes the plane while preserving geometry and dimension names"),
     CommandSpec::new("browser.group", "New Group", group)
         .icon("folder")
-        .params("folder: bodies|sketches|construction; component?: id (default 0); name?; items?: [keys] (they leave other groups)"),
-    CommandSpec::new("browser.ungroup", "Ungroup", ungroup).icon("folder").params("group: id (its items go back to the folder)"),
+        .params("folder: bodies|sketches|construction; component?: id (default 0); name?; parent?: group id of the same folder (nests it inside that group); items?: [keys] (they leave other groups)"),
+    CommandSpec::new("browser.ungroup", "Ungroup", ungroup).icon("folder").params("group: id (its items go back to the folder, and the groups inside it move up into its place)"),
     CommandSpec::new("browser.rename_group", "Rename Group", rename_group).icon("rename").params("group: id, name"),
     CommandSpec::new("browser.move", "Move Browser Items", move_items).icon("reorder")
         .params("folder, component?, items: [keys]; group?: id (into it; omit to take them out of groups); before?: key (position in the group)"),
@@ -94,7 +94,12 @@ fn keys(p: &Value, k: &str, cmd: &str) -> Result<Vec<String>> {
 }
 
 fn group_id(s: &Session, p: &Value, cmd: &str) -> Result<u64> {
-    let id = p.get("group").and_then(Value::as_u64).ok_or_else(|| bad(cmd, "`group` must be a group id"))?;
+    group_param(s, p, "group", cmd)
+}
+
+/// A group id from one of a command's parameters, refused when no group of that id exists.
+fn group_param(s: &Session, p: &Value, key: &str, cmd: &str) -> Result<u64> {
+    let id = p.get(key).and_then(Value::as_u64).ok_or_else(|| bad(cmd, format!("`{key}` must be a group id")))?;
     if s.doc.browser_groups.iter().any(|g| g.id == id) { Ok(id) } else { Err(bad(cmd, format!("no group {id}"))) }
 }
 
@@ -103,6 +108,17 @@ fn group(s: &mut Session, p: &Value) -> Result<Value> {
     let folder = folder_of(p, cmd)?;
     let component = component_of(s, p, cmd)?;
     let items = keys(p, "items", cmd)?;
+    let parent = match p.get("parent") {
+        Some(Value::Null) | None => None,
+        Some(_) => {
+            let id = group_param(s, p, "parent", cmd)?;
+            let nested = s.doc.browser_groups.iter().any(|g| g.id == id && g.component == component && g.folder == folder);
+            if !nested {
+                return Err(bad(cmd, "`parent` must be a group of this folder and component"));
+            }
+            Some(id)
+        }
+    };
     let d = s.doc_mut();
     let id = d.allocate_id()?;
     let name = match str_(p, "name").map(str::trim).filter(|n| !n.is_empty()) {
@@ -113,13 +129,19 @@ fn group(s: &mut Session, p: &Value) -> Result<Value> {
     for g in d.browser_groups.iter_mut().filter(|g| g.component == component && g.folder == folder) {
         g.items.retain(|k| !items.contains(k));
     }
-    d.browser_groups.push(solidcraft_doc::BrowserGroup { id, name: name.clone(), component, folder, items });
-    Ok(json!({ "group": id, "name": name }))
+    d.browser_groups.push(solidcraft_doc::BrowserGroup { id, name: name.clone(), component, folder, parent, items });
+    Ok(json!({ "group": id, "name": name, "parent": parent }))
 }
 
 fn ungroup(s: &mut Session, p: &Value) -> Result<Value> {
     let id = group_id(s, p, "browser.ungroup")?;
-    s.doc_mut().browser_groups.retain(|g| g.id != id);
+    let d = s.doc_mut();
+    // The groups this one held move up into its place, so removing a folder never buries what it held.
+    let parent = d.browser_groups.iter().find(|g| g.id == id).and_then(|g| g.parent);
+    for g in d.browser_groups.iter_mut().filter(|g| g.parent == Some(id)) {
+        g.parent = parent;
+    }
+    d.browser_groups.retain(|g| g.id != id);
     Ok(json!({ "group": id }))
 }
 

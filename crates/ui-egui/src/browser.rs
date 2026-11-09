@@ -2329,13 +2329,20 @@ fn construction_sel(f: &solidcraft_engine::doc::Feature) -> Sel {
     }
 }
 
-/// A folder's groups (with their items) and the items in no group, in browser order.
+/// One group of a folder with what it holds: its own items and the groups nested inside it.
+struct Arranged<'a> {
+    group: &'a solidcraft_engine::doc::BrowserGroup,
+    items: Vec<Entry>,
+    children: Vec<Arranged<'a>>,
+}
+
+/// A folder's groups (with their items, nested) and the items in no group, in browser order.
 fn arrange<'a>(
     doc: &'a solidcraft_engine::doc::Document,
     comp: u64,
     folder: &str,
     all: Vec<Entry>,
-) -> (Vec<(&'a solidcraft_engine::doc::BrowserGroup, Vec<Entry>)>, Vec<Entry>) {
+) -> (Vec<Arranged<'a>>, Vec<Entry>) {
     let mut rest: Vec<Option<Entry>> = all.into_iter().map(Some).collect();
     let mut take = |key: &str| rest.iter_mut().find(|e| e.as_ref().is_some_and(|e| e.key == key)).and_then(Option::take);
     let grouped: Vec<_> = doc
@@ -2344,9 +2351,37 @@ fn arrange<'a>(
         .filter(|g| g.component == comp && g.folder == folder)
         .map(|g| {
             let items = g.items.iter().filter_map(|k| take(k)).collect();
-            (g, items)
+            Arranged { group: g, items, children: Vec::new() }
         })
         .collect();
+    // Nest each group inside its parent, when that parent is a group of this same folder. A group
+    // whose parent is missing (a damaged or hand-edited design) stays at the folder's own level
+    // rather than disappearing, and an ancestor loop is broken the same way.
+    let ids: Vec<u64> = grouped.iter().map(|node| node.group.id).collect();
+    let index = |id: u64| ids.iter().position(|x| *x == id);
+    let parents: Vec<Option<usize>> = grouped
+        .iter()
+        .map(|node| {
+            let mut current = node.group.parent.and_then(&index);
+            let mut steps = 0usize;
+            while let Some(at) = current {
+                steps += 1;
+                if steps > ids.len() || at == index(node.group.id).unwrap_or(usize::MAX) {
+                    return None;
+                }
+                current = grouped[at].group.parent.and_then(&index);
+            }
+            node.group.parent.and_then(index)
+        })
+        .collect();
+    fn assemble<'a>(slots: &mut [Option<Arranged<'a>>], parents: &[Option<usize>], at: usize) -> Option<Arranged<'a>> {
+        let mut node = slots[at].take()?;
+        node.children = (0..slots.len()).filter(|i| parents[*i] == Some(at)).filter_map(|i| assemble(slots, parents, i)).collect();
+        Some(node)
+    }
+    let mut slots: Vec<Option<Arranged<'a>>> = grouped.into_iter().map(Some).collect();
+    let roots = (0..slots.len()).filter(|i| parents[*i].is_none()).collect::<Vec<_>>();
+    let grouped: Vec<Arranged<'a>> = roots.into_iter().filter_map(|i| assemble(&mut slots, &parents, i)).collect();
     let mut loose: Vec<Entry> = rest.into_iter().flatten().collect();
     if let Some(order) = doc.browser_order.get(&format!("{comp}/{folder}")) {
         let mut positions = std::collections::HashMap::with_capacity(order.len());
@@ -2515,22 +2550,51 @@ fn folder_rows_at(
             entry_row(app, ui, comp, path, fstatic, e, depth + 1, None, loose_keys, folder_faded, acts);
         }
     }
-    for group in &data.groups {
+    group_rows(app, ui, comp, path, prefix, fstatic, &data.groups, inner, folder_faded, loose_keys, render, acts);
+    if !render {
+        for e in &data.loose {
+            entry_row(app, ui, comp, path, fstatic, e, inner, None, loose_keys, folder_faded, acts);
+        }
+    }
+}
+
+/// A folder's groups as rows: each one's own items, then the groups nested inside it, indented —
+/// so `Hardware` can hold `Cams` and `Dowels` and the tree still reads as the thing it is.
+#[allow(clippy::too_many_arguments)]
+fn group_rows(
+    app: &mut SolveApp,
+    ui: &mut egui::Ui,
+    comp: u64,
+    path: Option<&[u64]>,
+    prefix: &str,
+    fstatic: &'static str,
+    groups: &[cache::Group],
+    depth: usize,
+    parent_faded: bool,
+    loose_keys: &[String],
+    render: bool,
+    acts: &mut Actions,
+) {
+    for group in groups {
         let (id, items, gkey) = (group.id, &group.items, &group.key);
         let gopen = is_open(app, gkey, true);
         let gshown = !app.session.folder_hidden(gkey);
-        let group_faded = folder_faded || !gshown;
+        let group_faded = parent_faded || !gshown;
         let label = if render {
             app.session.doc.browser_groups.iter().find(|g| g.id == id).map_or(group.label.as_str(), |g| g.name.as_str())
         } else {
             &group.label
         };
-        let count = if render && !gopen { crate::i18n::format("render.tree_more", &[("count", &items.len().to_string())]) } else { String::new() };
+        let count = if render && !gopen {
+            crate::i18n::format("render.tree_more", &[("count", &group.entries().count().to_string())])
+        } else {
+            String::new()
+        };
         let r = draw_row(
             ui,
             ui.id().with(gkey),
             &Row {
-                depth: inner,
+                depth,
                 fold: Some(gopen),
                 eye: (!render || gopen).then_some(gshown),
                 icon: if render { "" } else { "folder" },
@@ -2538,14 +2602,14 @@ fn folder_rows_at(
                 name: true,
                 dim: group_faded || (render && !gopen),
                 count: &count,
-                mark: acts.lit.branch(app, items),
+                mark: acts.lit.branch(app, group.entries()),
                 ..Default::default()
             },
         );
         if r.fold {
             toggle(app, gkey, true);
         } else if r.clicked {
-            let names: Vec<String> = items.iter().flat_map(|e| e.bodies.clone()).collect();
+            let names: Vec<String> = group.entries().flat_map(|e| e.bodies.clone()).collect();
             if !offer_bodies(app, &names, Take::Toggle) {
                 pick_folder(app, gkey);
                 toggle(app, gkey, true);
@@ -2555,7 +2619,7 @@ fn folder_rows_at(
             toggle_folder(app, gkey);
         }
         if r.hovered {
-            acts.hover(items.iter().flat_map(|e| &e.bodies));
+            acts.hover(group.entries().flat_map(|e| &e.bodies));
         }
         if let Some(p) = r.secondary {
             acts.menu = Some((p, Target::Group { id, scope: prefix.to_owned() }));
@@ -2567,13 +2631,9 @@ fn folder_rows_at(
         }
         if gopen {
             for e in items {
-                entry_row(app, ui, comp, path, fstatic, e, inner + 1, Some(id), loose_keys, group_faded, acts);
+                entry_row(app, ui, comp, path, fstatic, e, depth + 1, Some(id), loose_keys, group_faded, acts);
             }
-        }
-    }
-    if !render {
-        for e in &data.loose {
-            entry_row(app, ui, comp, path, fstatic, e, inner, None, loose_keys, folder_faded, acts);
+            group_rows(app, ui, comp, path, prefix, fstatic, &group.children, depth + 1, group_faded, loose_keys, render, acts);
         }
     }
 }

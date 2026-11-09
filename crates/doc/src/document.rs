@@ -2847,6 +2847,9 @@ pub struct BrowserGroup {
     #[serde(default)]
     pub component: u64,
     pub folder: String,
+    /// The group this one is nested in, in the same folder. `None` places it at the folder's own level.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<u64>,
     #[serde(default)]
     pub items: Vec<String>,
 }
