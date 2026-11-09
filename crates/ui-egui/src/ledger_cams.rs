@@ -22,18 +22,20 @@
 //! pairs, and no two joints drill the same point.
 //!
 //! [`ledger_holes::Hole::station`] is the engine's own answer to "which fastener is this bore part of", so the block is
-//! placed once per station — 60 of them on the 48x72's 166 bores — and on the station's **cup** where it has one,
-//! because that is the bore this block is the cutter of and it stands 33 mm in from the edge the joint converges on.
-//! Nothing the engine returned changes; the status line states the bores, the fittings and the stations so the three
-//! numbers can never be mistaken for each other.
+//! placed once per station — 60 of them on the 48x72's 166 bores — and on the bore that *is* the joint: the mate's
+//! ⌀10 pre-hole, where the two boards meet ([`ledger_holes::station_anchor`]). Placing it on the cup instead marked only
+//! the board that carries the fitting, so the tabletop — 22 pre-holes and 6 dowel mates on part 1, and no cup anywhere —
+//! showed no marks at all, and the ones beside it belonged to the rails and legs underneath. Nothing the engine returned
+//! changes; the status line states the bores, the fittings and the stations so the three numbers can never be mistaken
+//! for each other.
 
 use std::collections::BTreeSet;
 
 use ledger_holes::translate::Board;
-use ledger_holes::{Fastener, HoleKind, Panel, Settings, hole_at_world, plan};
+use ledger_holes::{Fastener, Hole, Panel, Settings, hole_at_world, plan, station_anchor};
 use serde_json::{Value, json};
 
-/// The cam cup's cutter: the block this button has always drawn.
+/// The cam cup's cutter: the block this button has always drawn, wherever it now stands.
 const MARKER: f64 = 15.0;
 const MARKER_DEEP: f64 = 14.2;
 
@@ -189,25 +191,36 @@ pub fn calc(app: &mut crate::SolveApp) -> Outcome {
     /// A carcass has tens of bores. Hundreds means the pairing is wrong, and drawing them would bury the design.
     const MOST_MARKERS: usize = 600;
 
-    // **One marker per station.** The engine says which fastener each bore belongs to (`Hole::station`), so the list is
-    // grouped by that id rather than by proximity: the bolt and its ⌀10 mate are the same world point, and one cam is
-    // three bores. The block stands on the **cup** where the fitting has one — the 15 x 15 x 14.2 block *is* the cup's
-    // cutter, and the cup is 33 mm in from the edge the joint converges on, so a corner no longer collects a pile of
-    // blocks on one point.
+    // **One marker per station, at the joint.** The engine says which fastener each bore belongs to
+    // (`Hole::station`), so the list is grouped by that id rather than by proximity: the bolt and its ⌀10 mate are the
+    // same world point, and one cam is three bores. Within a station the block goes on the bore that *is* the joint —
+    // `ledger_holes::station_anchor` prefers the mate's pre-hole, i.e. the point where the two boards meet. That is
+    // what makes a board which only receives mates (the tabletop: 22 pre-holes and 6 dowel mates, no cup at all)
+    // carry a mark, and it puts the cup board's mark on the same point instead of 33 mm in from the seam; a corner
+    // no longer collects a pile of blocks either.
     let mut stations: Vec<Station> = Vec::new();
+    let mut bores: Vec<Vec<&Hole>> = Vec::new();
     for hole in &run.holes {
-        let Some(panel) = panels.iter().find(|panel| panel.id == hole.part_id) else {
+        if !panels.iter().any(|panel| panel.id == hole.part_id) {
+            continue;
+        }
+        match stations.iter().position(|station| station.id == hole.station) {
+            Some(index) => bores[index].push(hole),
+            None => {
+                stations.push(Station { id: hole.station, fastener: hole.kind.fastener(), at: [0.0; 3] });
+                bores.push(vec![hole]);
+            }
+        }
+    }
+    for (station, group) in stations.iter_mut().zip(&bores) {
+        let Some(anchor) = station_anchor(group.iter().copied()) else {
             continue;
         };
-        let at = hole_at_world(panel, hole);
-        match stations.iter_mut().find(|station| station.id == hole.station) {
-            Some(station) => {
-                if hole.kind == HoleKind::CamCup {
-                    station.at = at;
-                }
-            }
-            None => stations.push(Station { id: hole.station, fastener: hole.kind.fastener(), at }),
-        }
+        let Some(panel) = panels.iter().find(|panel| panel.id == anchor.part_id) else {
+            continue;
+        };
+        station.at = hole_at_world(panel, anchor);
+        station.fastener = anchor.kind.fastener();
     }
 
     for station in &stations {
