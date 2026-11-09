@@ -12,31 +12,30 @@
 //! engine reports a hole in its panel's frame, and [`ledger_holes::hole_at_world`] undoes that frame (and the vendor's
 //! `0..thickness` z scale) so the block lands where the panel is.
 //!
-//! # One marker per station, not per hole
+//! # One marker per station, not per bore
 //!
-//! The engine answers for **both** sides of a joint: a cam is a ⌀8 bolt up the source's edge and the ⌀10 pre-hole it
-//! needs in the panel it lands on, and those two mouths are the *same world point*. Drawn one per hole, a 166-hole
-//! table comes out as 166 blocks lying in 106 places, half of them exactly on top of the other half. So the mouths are
-//! clustered within [`STATION`] and one block is placed on each cluster: 166 holes, 106 stations. Nothing the engine
-//! returned changes — this is presentation, and the status line reports both numbers so the difference is never
-//! silent.
+//! The engine emits **bores**, and a fastener is several of them. One cam is three: the ⌀8 bolt up the source's edge,
+//! the ⌀15 cup 33 mm in on the mating face, and the ⌀10 pre-hole in the mate — which lands on the bolt's *own* world
+//! point. One dowel is two, again coincident. Drawing a block per bore therefore drew every joint twice, and at a
+//! leg/top corner, where three joints converge (leg→top, apron→top, leg→back panel), a dozen blocks landed in a 150 mm
+//! cube. The arithmetic says the fault was never in the holes: all 60 coincidences in the 48x72 fixture are bolt/mate
+//! pairs, and no two joints drill the same point.
+//!
+//! [`ledger_holes::Hole::station`] is the engine's own answer to "which fastener is this bore part of", so the block is
+//! placed once per station — 60 of them on the 48x72's 166 bores — and on the station's **cup** where it has one,
+//! because that is the bore this block is the cutter of and it stands 33 mm in from the edge the joint converges on.
+//! Nothing the engine returned changes; the status line states the bores, the fittings and the stations so the three
+//! numbers can never be mistaken for each other.
 
 use std::collections::BTreeSet;
 
 use ledger_holes::translate::Board;
-use ledger_holes::{Panel, Settings, hole_at_world, plan};
+use ledger_holes::{Fastener, HoleKind, Panel, Settings, hole_at_world, plan};
 use serde_json::{Value, json};
 
 /// The cam cup's cutter: the block this button has always drawn.
 const MARKER: f64 = 15.0;
 const MARKER_DEEP: f64 = 14.2;
-
-/// How close two mouths have to be to be the same station.
-///
-/// A joint's two sides are reported from two different panels' frames, so the same world point arrives through two
-/// sets of dot products and can differ in the last bit. Half a millimetre is far below any real spacing between bores
-/// in a carcass (the pitch is 32 mm) and far above that noise.
-pub const STATION: f64 = 0.5;
 
 struct Box3 {
     name: String,
@@ -70,13 +69,30 @@ fn boxes(value: &Value) -> Vec<Box3> {
     out
 }
 
+/// One fastener in the drawing: an engine station, where its block goes, and which fitting it is.
+struct Station {
+    /// The engine's station id, so two stations can never be the same fastener.
+    id: u32,
+    fastener: Fastener,
+    /// Where the block stands, in model millimetres.
+    at: [f64; 3],
+}
+
 /// What one pass did: what it drew, and the engine's own account of the run.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Outcome {
-    /// Holes the engine returned — both sides of every joint, so a cam counts its bolt and its ⌀10 mate.
+    /// Bores the engine returned — every side of every joint, so a cam counts its bolt, its cup and its ⌀10 mate.
     pub holes: usize,
-    /// Markers placed: one per station, i.e. per cluster of mouths within [`STATION`].
+    /// Fasteners the engine fitted, i.e. distinct stations: 46 cams and 14 dowels are 60.
     pub stations: usize,
+    /// Markers actually placed — one per station, unless the safety cap stopped the pass short.
+    pub drawn: usize,
+    /// Camlocks among the stations.
+    pub cams: usize,
+    /// Dowels among the stations. A dowel fitted beside a cam is its own fastener, so it is its own station.
+    pub dowels: usize,
+    /// Movable-shelf pins among the stations.
+    pub pins: usize,
     /// Panels the translation accepted.
     pub panels: usize,
     /// Joints whose first position punched a neighbour and were moved (`CheckPunchConflict`).
@@ -91,11 +107,21 @@ pub struct Outcome {
     pub unparsed: usize,
 }
 
+/// `0 camlocks`, `1 camlock`, `46 camlocks` — the shop's plural, not a naive `s`.
+fn plural(n: usize, one: &str) -> String {
+    if n == 1 {
+        format!("1 {one}")
+    } else {
+        format!("{n} {one}s")
+    }
+}
+
 impl Outcome {
     /// The status line, in the ribbon's voice.
     ///
-    /// Both counts are always reported: the holes are the engine's answer, the stations are what the drawing now
-    /// shows, and a reader who sees only one of the numbers cannot tell a doubled joint from a missing one.
+    /// Every count is always reported: the bores are the engine's answer, the fittings are what the shop ordered, and
+    /// the stations are what the drawing now shows. A reader who sees only one of the three cannot tell a doubled joint
+    /// from a missing one.
     pub fn message(&self) -> String {
         if self.panels == 0 {
             return "no boards to count - a flat-pack carcass needs two boards meeting".to_owned();
@@ -103,15 +129,20 @@ impl Outcome {
         if self.holes == 0 {
             return format!("{} panels, no bore fitted on them", self.panels);
         }
+        let mut fittings = format!("{} and {}", plural(self.cams, "camlock"), plural(self.dowels, "dowel"));
+        if self.pins > 0 {
+            fittings.push_str(&format!(" and {}", plural(self.pins, "shelf pin")));
+        }
+        let short = if self.drawn == self.stations { String::new() } else { format!(", {} markers drawn", self.drawn) };
         format!(
-            "{} holes at {} stations (engine: retried {}, dropped {}, unbanded {}, unported {}, unparsed {})",
-            self.holes, self.stations, self.retried, self.dropped, self.unbanded, self.unported, self.unparsed
+            "{} at {} stations ({} holes{}; engine: retried {}, dropped {}, unbanded {}, unported {}, unparsed {})",
+            fittings, self.stations, self.holes, short, self.retried, self.dropped, self.unbanded, self.unported, self.unparsed
         )
     }
 }
 
-/// Run the vendor's engine over the selected bodies - or all of them when nothing is selected - and draw a block at
-/// every hole it returns.
+/// Run the vendor's engine over the selected bodies - or all of them when nothing is selected - and draw one block
+/// per station (fastener) it fits.
 pub fn calc(app: &mut crate::SolveApp) -> Outcome {
     let Ok(measured) = app.session.execute("inspect.measure", &json!({})) else {
         return Outcome::default();
@@ -158,24 +189,28 @@ pub fn calc(app: &mut crate::SolveApp) -> Outcome {
     /// A carcass has tens of bores. Hundreds means the pairing is wrong, and drawing them would bury the design.
     const MOST_MARKERS: usize = 600;
 
-    // **One marker per station.** The engine answers for both sides of a joint — the ⌀8 bolt up the edge and the ⌀10
-    // it needs in the mate are the same world point — so its hole list holds each shared mouth twice. Cluster the
-    // mouths within `STATION` and keep the first of each cluster; the engine's list itself is untouched.
-    let mut stations: Vec<[f64; 3]> = Vec::new();
+    // **One marker per station.** The engine says which fastener each bore belongs to (`Hole::station`), so the list is
+    // grouped by that id rather than by proximity: the bolt and its ⌀10 mate are the same world point, and one cam is
+    // three bores. The block stands on the **cup** where the fitting has one — the 15 x 15 x 14.2 block *is* the cup's
+    // cutter, and the cup is 33 mm in from the edge the joint converges on, so a corner no longer collects a pile of
+    // blocks on one point.
+    let mut stations: Vec<Station> = Vec::new();
     for hole in &run.holes {
         let Some(panel) = panels.iter().find(|panel| panel.id == hole.part_id) else {
             continue;
         };
-        let centre = hole_at_world(panel, hole);
-        let already = stations
-            .iter()
-            .any(|at| (0..3).all(|axis| (at[axis] - centre[axis]).abs() <= STATION));
-        if !already {
-            stations.push(centre);
+        let at = hole_at_world(panel, hole);
+        match stations.iter_mut().find(|station| station.id == hole.station) {
+            Some(station) => {
+                if hole.kind == HoleKind::CamCup {
+                    station.at = at;
+                }
+            }
+            None => stations.push(Station { id: hole.station, fastener: hole.kind.fastener(), at }),
         }
     }
 
-    for centre in &stations {
+    for station in &stations {
         if drawn >= MOST_MARKERS {
             break;
         }
@@ -187,16 +222,21 @@ pub fn calc(app: &mut crate::SolveApp) -> Outcome {
                 "length": MARKER,
                 "width": MARKER,
                 "height": MARKER_DEEP,
-                "center": centre,
+                "center": station.at,
                 "name": name,
                 "body_name": name,
             }),
         );
         drawn += 1;
     }
+    let count = |fastener: Fastener| stations.iter().filter(|station| station.fastener == fastener).count();
     Outcome {
         holes: run.holes.len(),
-        stations: drawn,
+        stations: stations.len(),
+        drawn,
+        cams: count(Fastener::Cam),
+        dowels: count(Fastener::Dowel),
+        pins: count(Fastener::ShelfPin),
         panels: panels.len(),
         retried: run.retried,
         dropped: run.dropped,
