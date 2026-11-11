@@ -286,14 +286,6 @@ pub struct Hardware {
     pub price: f64,
 }
 
-impl Hardware {
-    /// "hinge · CLIP top BLUMOTION", or just the kind when the maker's model is missing.
-    fn subtitle(&self) -> String {
-        let kind = if self.kind.is_empty() { "hardware".to_owned() } else { self.kind.clone() };
-        if self.model.is_empty() { kind } else { format!("{kind} · {}", self.model) }
-    }
-}
-
 /// What the shop's hardware file holds.
 pub fn parse_hardware(text: &str) -> Result<Vec<Hardware>, String> {
     let value: serde_json::Value = serde_json::from_str(text).map_err(|error| error.to_string())?;
@@ -1800,46 +1792,11 @@ fn materials_panel(app: &mut SolveApp, ui: &mut egui::Ui, area: Rect, mut x: f32
     x
 }
 
-/// The shop's hardware: a plain list in its own group, because the editor has no part files to place yet.
+/// The Hardware subtab: the actions that place and drill hardware. The read-only list of Ledger's hardware that stood
+/// first here is gone - the room is for "add a hinge"-style buttons, one per kind of fitting.
 fn hardware_panel(app: &mut SolveApp, ui: &egui::Ui, area: Rect, x: f32) -> f32 {
-    let t = Tokens::get();
     let top = area.top();
-    let (rows, error) = hardware(false);
-    if let Some(error) = &error {
-        ui.painter().text(
-            pos2(x + INSET, top + BUTTON_HEIGHT / 2.0),
-            Align2::LEFT_CENTER,
-            format!("Ledger's hardware could not be read - {error}"),
-            crate::fonts::semibold(t.font_small),
-            t.text_dim,
-        );
-        return x;
-    }
-    if rows.is_empty() {
-        ui.painter().text(
-            pos2(x + INSET, top + BUTTON_HEIGHT / 2.0),
-            Align2::LEFT_CENTER,
-            "Ledger has no hardware yet - add a hinge or a handle there",
-            crate::fonts::semibold(t.font_small),
-            t.text_dim,
-        );
-        return x;
-    }
-    let width = 300.0;
-    let mut y = top + 8.0;
-    for item in rows.iter().take(2) {
-        ui.painter().text(pos2(x + INSET, y), Align2::LEFT_TOP, &item.name, crate::fonts::semibold(t.font_button), t.text);
-        let second = if item.price > 0.0 { format!("{} · {:.2}", item.subtitle(), item.price) } else { item.subtitle() };
-        ui.painter().text(pos2(x + INSET + 132.0, y), Align2::LEFT_TOP, second, crate::fonts::medium(t.font_small), t.text_dim);
-        crate::scenario::publish_target(
-            &format!("ledger:hardware:{}", item.name),
-            Rect::from_min_size(pos2(x + INSET, y - 4.0), vec2(width - 2.0 * INSET, 20.0)),
-        );
-        y += 22.0;
-    }
-    group_caption(ui, area, x, width, "Hardware");
-    let mut x = x + width + PANEL_GAP;
-    group_rule(ui, area, x);
+    let mut x = x;
     // Counting camlocks happens here now: on the design, where the seams can be seen while they are worked out.
     let label = "Calc Camlocks";
     let width = button_width_at(ui, label, 110.0) + 2.0 * INSET;
@@ -2157,8 +2114,6 @@ mod tests {
         ]}"##;
         let rows = parse_hardware(text).expect("the file reads");
         assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0].subtitle(), "hinge · 71B3550");
-        assert_eq!(rows[1].subtitle(), "handle", "no model, just the kind");
         assert!(parse_hardware(r#"{"hardware": []}"#).is_err(), "another file is refused");
     }
 
