@@ -33,6 +33,27 @@ const THICKEST_BOARD_MM: f64 = 40.0;
 /// A board is thin against its own middle dimension; a solid block is not.
 const BOARD_RATIO: f64 = 0.30;
 
+/// The biggest a foot or glide gets across any side (mm): a leg post is far longer, a cam block never stands on the floor.
+const FOOT_MAX_MM: f64 = 80.0;
+/// How far above the bottom of the whole piece a foot may start (mm): it is what the piece stands on.
+const FOOT_FLOOR_MM: f64 = 15.0;
+
+/// A small block standing at the very bottom of the piece is a foot (a glide or leveller), named for the corner it is at:
+/// `foot - front left`. Front is the low-Y side, as everywhere else in these names.
+fn foot(size: [f64; 3], centre: [f64; 3], bottom: f64, lo: [f64; 3], hi: [f64; 3]) -> Option<String> {
+    let biggest = size[0].max(size[1]).max(size[2]);
+    let smallest = size[0].min(size[1]).min(size[2]);
+    if biggest > FOOT_MAX_MM || smallest < 3.0 || bottom > lo[2] + FOOT_FLOOR_MM {
+        return None;
+    }
+    let middle = [(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0];
+    Some(format!(
+        "foot - {} {}",
+        if centre[1] < middle[1] { "front" } else { "rear" },
+        if centre[0] < middle[0] { "left" } else { "right" }
+    ))
+}
+
 /// What a body is, when the shape says one thing and no other.
 fn describe(body: &Box3, whole: [f64; 3], lo: [f64; 3], hi: [f64; 3]) -> Option<String> {
     let size = body.size();
@@ -40,6 +61,10 @@ fn describe(body: &Box3, whole: [f64; 3], lo: [f64; 3], hi: [f64; 3]) -> Option<
     let (ax, ay, az) = (whole[0], whole[1], whole[2]);
     if ax <= 0.0 || ay <= 0.0 || az <= 0.0 {
         return None;
+    }
+    // A foot is told by its size and its place before anything is asked of it as a board: it is not one.
+    if let Some(name) = foot(size, centre, body.lo[2], lo, hi) {
+        return Some(name);
     }
     let mut order = [0usize, 1, 2];
     order.sort_by(|a, b| size[*a].total_cmp(&size[*b]));
@@ -143,9 +168,17 @@ pub fn name_parts(app: &mut crate::SolveApp) -> (usize, usize) {
         }
     }
     let whole = [hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]];
+    // Calc Camlocks' markers keep their own names (`cam 3`, `dowel 1`, `pin 2`): it finds them again by those, and a marker
+    // in a bottom panel is a small block near the floor that would otherwise pass for a foot.
+    let marker = |name: &str| name.starts_with("cam ") || name.starts_with("dowel ") || name.starts_with("pin ");
     let mut wanted: Vec<String> = bodies
         .iter()
-        .map(|body| describe(body, whole, lo, hi).unwrap_or_else(|| "unnamed".to_owned()))
+        .map(|body| {
+            if marker(&body.name) {
+                return "unnamed".to_owned();
+            }
+            describe(body, whole, lo, hi).unwrap_or_else(|| "unnamed".to_owned())
+        })
         .collect();
     // Panels facing front to back are decided together: the ones standing at an outer face are that panel, what stands between
     // them divides the space.
@@ -197,4 +230,27 @@ pub fn name_parts(app: &mut crate::SolveApp) -> (usize, usize) {
         }
     }
     (named, unnamed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn block(name: &str, lo: [f64; 3], hi: [f64; 3]) -> Box3 {
+        Box3 { name: name.into(), lo, hi, volume: 0.0 }
+    }
+
+    /// SOL-DKS-2448's glides, measured: 21.3 x 21.3 x 10.5 mm at the floor under each corner of a 1200 x 600 desk.
+    #[test]
+    fn a_glide_at_the_floor_is_a_foot_and_names_its_corner() {
+        let (lo, hi) = ([0.0, -600.1, -1.8], [1200.1, 0.0, 762.0]);
+        let whole = [hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]];
+        let glide = block("Part (3)", [0.4, -458.3, -1.8], [21.7, -437.0, 8.8]);
+        assert_eq!(describe(&glide, whole, lo, hi).as_deref(), Some("foot - front left"));
+        let glide = block("Part (5)", [1178.0, -163.1, -1.8], [1199.3, -141.7, 8.8]);
+        assert_eq!(describe(&glide, whole, lo, hi).as_deref(), Some("foot - rear right"));
+        // The same block up in the air is not a foot, and not a board either.
+        let high = block("Part (7)", [0.4, -458.3, 300.0], [21.7, -437.0, 310.5]);
+        assert_eq!(describe(&high, whole, lo, hi), None);
+    }
 }

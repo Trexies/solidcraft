@@ -1601,6 +1601,7 @@ pub fn ribbon(app: &mut SolveApp, ui: &mut egui::Ui, area: Rect) {
             "bands" => "edge_continuity",
             _ => "update",
         };
+        crate::scenario::publish_handle(&format!("ledger:{id}"), rect.center());
         if ribbon_button_icon(ui, id, rect, label, false, false, Some(icon)).clicked() {
             match *id {
                 "bands" => {
