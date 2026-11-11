@@ -74,11 +74,20 @@ static GUARDING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::
 
 /// The boards recorded in this design: body name to its tag.
 fn design_boards(app: &mut SolveApp) -> serde_json::Map<String, serde_json::Value> {
+    ledger_meta(app).get("boards").and_then(serde_json::Value::as_object).cloned().unwrap_or_default()
+}
+
+/// Everything this tab keeps in the design under `shop.ledger`: the boards' limits and the turned grain.
+///
+/// `document.metadata.set` replaces the key's whole object, so every writer reads this, changes its own part and writes it
+/// all back - otherwise recording a board would wipe the grain, and turning the grain would wipe the boards.
+fn ledger_meta(app: &mut SolveApp) -> serde_json::Map<String, serde_json::Value> {
     // Another tool's data comes back under `metadata`; `properties` holds only SolidCraft's own text fields (author,
     // description, part_number, …) and answers null for this key, which would leave the guard blind.
-    app.run("document.metadata", json!({}))
+    app.session
+        .execute("document.metadata", &json!({}))
         .ok()
-        .and_then(|answer| answer.get("metadata")?.get(KEY)?.get("boards")?.as_object().cloned())
+        .and_then(|answer| answer.get("metadata")?.get(KEY)?.as_object().cloned())
         .unwrap_or_default()
 }
 
@@ -101,7 +110,9 @@ fn record(app: &mut SolveApp, name: &str, board: &Board, cut: (f64, f64)) -> Res
             "sheet": sheet_name(board),
         }),
     );
-    app.run("document.metadata.set", json!({ "values": { KEY: { "boards": boards } } }))?;
+    let mut meta = ledger_meta(app);
+    meta.insert("boards".to_owned(), serde_json::Value::Object(boards));
+    app.run("document.metadata.set", json!({ "values": { KEY: meta } }))?;
     Ok(())
 }
 
@@ -556,171 +567,334 @@ fn listed_has(answer: &serde_json::Value, name: &str) -> bool {
 /// a preference of the host program.
 static WIREFRAME_ON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// Whether the grain is drawn on the boards, and which way it runs. Cosmetic geometry, so it is never saved: the lines are
-/// deleted when the switch goes off, and drawn again when it comes on.
+/// Whether the grain arrows are drawn. A way of looking at the design, so it is the session's, not the design's.
 static GRAIN_ON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-/// Which boards have their grain turned round, by body name: turning one board is a decision about that board, and a shop
-/// flips the top of a table without touching its apron. A set rather than one flag for the whole drawing.
-static GRAIN_FLIPPED: std::sync::Mutex<std::collections::BTreeSet<String>> =
-    std::sync::Mutex::new(std::collections::BTreeSet::new());
 
-fn grain_flipped(name: &str) -> bool {
-    GRAIN_FLIPPED.lock().map(|set| set.contains(name)).unwrap_or(false)
-}
+/// Under `shop.ledger` in the design's metadata: the boards whose grain runs **across** them rather than along their long
+/// side. Kept in the design, so a turned board stays turned after a save and a reopen, travels with the file, and a turn is
+/// one undo step like any other edit.
+const GRAIN_KEY: &str = "grain_across";
 
-/// Turn the grain on these boards, and leave the rest as they were.
-fn toggle_grain(names: &[String]) {
-    if let Ok(mut set) = GRAIN_FLIPPED.lock() {
-        for name in names {
-            if !set.remove(name) {
-                set.insert(name.clone());
-            }
-        }
-    }
-}
-
-/// The grain lines are named so they can be found and taken away again: nothing else in a design starts with this.
+/// The first version drew the grain as strip bodies named like this. They are swept away when the grain is shown.
 const GRAIN_PREFIX: &str = "grain ";
-
-/// The material the grain lines are given: bright red, so a line on a board is never mistaken for a joint.
-const GRAIN_MATERIAL: &str = "Grain Red";
 
 fn is_grain(name: &str) -> bool {
     name.starts_with(GRAIN_PREFIX)
 }
 
-/// Take every grain line out of the design. Selecting and deleting is the editor's own way, so the undo stack stays honest.
+/// Take the first version's strip bodies out of a design that still carries them.
 fn clear_grain(app: &mut SolveApp) {
-    let names: Vec<String> = app
-        .session
-        .world_state()
-        .bodies
-        .iter()
-        .map(|body| body.name.clone())
-        .filter(|name| is_grain(name))
-        .collect();
-    if names.is_empty() {
-        return;
+    let names: Vec<String> =
+        app.session.world_state().bodies.iter().map(|body| body.name.clone()).filter(|name| is_grain(name)).collect();
+    if !names.is_empty() {
+        let _ = app.run("solid.remove", json!({ "bodies": names }));
     }
-    // `solid.remove` is the editor's own way of taking bodies out of the timeline. Selecting and deleting looked successful but
-    // left them in place, so pressing flip twice stacked a second set of lines across the first.
-    let _ = app.run("solid.remove", json!({ "bodies": names }));
 }
 
-/// Draw the grain on every board: three thin red lines across the broad face, running along the board's long side - or across
-/// it, when the shop has flipped them. A board is a box, so its longest side is the direction a saw follows.
-fn draw_grain(app: &mut SolveApp) {
-    let faces = measure_faces(app);
-    let turned = faces.iter().filter(|f| f.flipped).count();
-    *GRAIN_FACES.lock().unwrap() = faces;
-    app.set_status(
-        format!(
-            "grain: {} faces marked, {turned} {} turned",
-            GRAIN_FACES.lock().map(|f| f.len()).unwrap_or(0),
-            if turned == 1 { "board" } else { "boards" }
-        ),
-        false,
-    );
+/// One board the grain is drawn on: its box, and whether its grain is turned across it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GrainBoard {
+    pub name: String,
+    pub lo: [f64; 3],
+    pub hi: [f64; 3],
+    pub across: bool,
 }
 
-/// One board's largest face, and which way the grain runs across it.
-pub struct GrainFace {
-    pub run: [f64; 3],
-    pub normal: [f64; 3],
-    pub centre: [f64; 3],
-    pub half: f64,
-    pub flipped: bool,
-}
+impl GrainBoard {
+    fn size(&self) -> [f64; 3] {
+        [self.hi[0] - self.lo[0], self.hi[1] - self.lo[1], self.hi[2] - self.lo[2]]
+    }
 
-/// The face the arrow is drawn on: the broad one. Measured once, when the switch is pressed, not on every frame.
-static GRAIN_FACES: std::sync::Mutex<Vec<GrainFace>> = std::sync::Mutex::new(Vec::new());
-
-fn measure_faces(app: &mut SolveApp) -> Vec<GrainFace> {
-    let Ok(answer) = app.run("inspect.measure", json!({})) else {
-        return Vec::new();
-    };
-    let mut faces = Vec::new();
-    let Some(bodies) = answer.get("bodies").and_then(serde_json::Value::as_array) else {
-        return faces;
-    };
-    for body in bodies {
-        let Some(name) = body.get("name").and_then(serde_json::Value::as_str) else {
-            continue;
-        };
-        if is_grain(name) {
-            continue;
-        }
-        let Some(bbox) = body.get("bbox") else { continue };
-        let corner = |key: &str| -> Option<[f64; 3]> {
-            let list = bbox.get(key)?.as_array()?;
-            Some([list.first()?.as_f64()?, list.get(1)?.as_f64()?, list.get(2)?.as_f64()?])
-        };
-        let (Some(lo), Some(hi)) = (corner("min"), corner("max")) else { continue };
-        let size = [hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]];
+    /// Thin, across, along: the axes of the box from shortest to longest.
+    fn axes(&self) -> [usize; 3] {
+        let size = self.size();
         let mut axes = [0usize, 1, 2];
         axes.sort_by(|a, b| size[*a].total_cmp(&size[*b]));
-        let (thin, across, along) = (axes[0], axes[1], axes[2]);
-        if !(12.0..=30.0).contains(&size[thin]) || size[across] < 60.0 {
-            continue;
-        }
-        let flipped = grain_flipped(name);
-        let run_axis = if flipped { across } else { along };
-        let mut run = [0.0; 3];
-        run[run_axis] = 1.0;
-        let mut normal = [0.0; 3];
-        normal[thin] = 1.0;
-        let mut centre = [0.0; 3];
-        for axis in 0..3 {
-            centre[axis] = (lo[axis] + hi[axis]) / 2.0;
-        }
-        centre[thin] = hi[thin] + 0.6;
-        faces.push(GrainFace {
-            run,
-            normal,
-            centre,
-            half: size[run_axis] * 0.34,
-            flipped,
-        });
+        axes
     }
-    faces
+
+    /// The axis the grain runs along: the long side, or the short one when the shop has turned it.
+    pub fn run_axis(&self) -> usize {
+        let [_, across, along] = self.axes();
+        if self.across { across } else { along }
+    }
 }
 
-/// A two-way arrow across each board's largest face, drawn over the model. Painted rather than modelled: a body thin enough to
-/// look like a line is a seam, and one thick enough to see is a bar. This is red, crisp and always legible at any zoom.
-pub fn paint_grain(painter: &egui::Painter, proj: &crate::viewport::Proj) {
+/// Whether a box is a board the grain means something on: sheet-thick, and wide enough to have a face. A cam block, a glide
+/// or a leg post is not.
+fn is_board_box(size: [f64; 3]) -> bool {
+    let mut sorted = size;
+    sorted.sort_by(f64::total_cmp);
+    (6.0..=40.0).contains(&sorted[0]) && sorted[1] >= 50.0
+}
+
+/// The boxes of every body in a measurement, by name, leaving out the old strip bodies.
+fn measured_boxes(answer: &serde_json::Value) -> Vec<(String, [f64; 3], [f64; 3])> {
+    let Some(bodies) = answer.get("bodies").and_then(serde_json::Value::as_array) else {
+        return Vec::new();
+    };
+    bodies
+        .iter()
+        .filter_map(|body| {
+            let name = body.get("name")?.as_str()?;
+            if is_grain(name) {
+                return None;
+            }
+            let bbox = body.get("bbox")?;
+            let corner = |key: &str| -> Option<[f64; 3]> {
+                let list = bbox.get(key)?.as_array()?;
+                Some([list.first()?.as_f64()?, list.get(1)?.as_f64()?, list.get(2)?.as_f64()?])
+            };
+            Some((name.to_owned(), corner("min")?, corner("max")?))
+        })
+        .collect()
+}
+
+/// The boards of a measurement, each with the direction the design records for it.
+pub fn grain_boards(answer: &serde_json::Value, across: &std::collections::BTreeSet<String>) -> Vec<GrainBoard> {
+    measured_boxes(answer)
+        .into_iter()
+        .filter(|(_, lo, hi)| is_board_box([hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]]))
+        .map(|(name, lo, hi)| GrainBoard { across: across.contains(&name), name, lo, hi })
+        .collect()
+}
+
+/// The boards whose grain the design records as turned.
+fn turned_in(meta: &serde_json::Map<String, serde_json::Value>) -> std::collections::BTreeSet<String> {
+    meta.get(GRAIN_KEY)
+        .and_then(serde_json::Value::as_array)
+        .map(|list| list.iter().filter_map(|v| v.as_str().map(str::to_owned)).collect())
+        .unwrap_or_default()
+}
+
+/// What the arrows are drawn from, read once per change of the design rather than on every frame.
+#[derive(Default)]
+struct GrainCache {
+    /// The design and the revision this was read at.
+    key: Option<(u64, u64, usize)>,
+    boards: Vec<GrainBoard>,
+    /// Every body's box, boards or not: what can stand between the eye and an arrow.
+    blockers: Vec<(String, [f64; 3], [f64; 3])>,
+}
+
+static GRAIN_CACHE: std::sync::Mutex<GrainCache> =
+    std::sync::Mutex::new(GrainCache { key: None, boards: Vec::new(), blockers: Vec::new() });
+
+fn design_key(app: &SolveApp) -> (u64, u64, usize) {
+    (app.session.uid, app.session.revision, std::sync::Arc::as_ptr(&app.session.doc) as *const () as usize)
+}
+
+/// Read the boards again when the design has changed since the last read: a board moved, merged, renamed, a design opened
+/// or switched. The first version measured once, when the menu was pressed, which is why its arrows went missing or
+/// stood where a board used to be.
+fn refresh_grain(app: &mut SolveApp) {
+    let key = design_key(app);
+    if GRAIN_CACHE.lock().map(|cache| cache.key == Some(key)).unwrap_or(true) {
+        return;
+    }
+    // Both reads are queries: they change nothing and add nothing to the undo stack.
+    let measured = app.session.execute("inspect.measure", &json!({})).unwrap_or_default();
+    let meta = ledger_meta(app);
+    let across = turned_in(&meta);
+    let boards = grain_boards(&measured, &across);
+    let blockers = measured_boxes(&measured);
+    if let Ok(mut cache) = GRAIN_CACHE.lock() {
+        // Keyed after the reads, so a read that bumped the revision cannot make this run on every frame.
+        cache.key = Some(design_key(app));
+        cache.boards = boards;
+        cache.blockers = blockers;
+    }
+}
+
+/// The boards a selection points at: a picked body, or the body a picked face, edge or corner is on.
+fn selected_boards(app: &SolveApp) -> Vec<String> {
+    let boards: Vec<String> =
+        GRAIN_CACHE.lock().map(|cache| cache.boards.iter().map(|b| b.name.clone()).collect()).unwrap_or_default();
+    let mut out: Vec<String> = Vec::new();
+    for sel in &app.session.selection {
+        let name = match sel {
+            solidcraft_engine::Sel::Body { name } => name,
+            solidcraft_engine::Sel::Face { body, .. } | solidcraft_engine::Sel::Edge { body, .. } => body,
+            solidcraft_engine::Sel::Vertex { body, .. } => body,
+            _ => continue,
+        };
+        if boards.contains(name) && !out.contains(name) {
+            out.push(name.clone());
+        }
+    }
+    out
+}
+
+/// Turn the grain on these boards - each one on its own, so a mixed selection swaps each - or put every board back along
+/// its long side when `names` is `None`. One metadata write: one undo step.
+fn turn_grain(app: &mut SolveApp, names: Option<&[String]>) -> Result<usize, String> {
+    let mut meta = ledger_meta(app);
+    let mut across = turned_in(&meta);
+    let changed = match names {
+        Some(names) => {
+            for name in names {
+                if !across.remove(name) {
+                    across.insert(name.clone());
+                }
+            }
+            names.len()
+        }
+        None => {
+            let count = across.len();
+            across.clear();
+            count
+        }
+    };
+    meta.insert(GRAIN_KEY.to_owned(), json!(across.into_iter().collect::<Vec<_>>()));
+    app.run("document.metadata.set", json!({ "values": { KEY: meta } }))?;
+    Ok(changed)
+}
+
+/// Where a ray meets a box, as a distance along it, if it does.
+fn ray_hits_box(origin: [f64; 3], dir: [f64; 3], lo: [f64; 3], hi: [f64; 3]) -> Option<f64> {
+    let (mut near, mut far) = (f64::NEG_INFINITY, f64::INFINITY);
+    for axis in 0..3 {
+        if dir[axis].abs() < 1e-12 {
+            if origin[axis] < lo[axis] || origin[axis] > hi[axis] {
+                return None;
+            }
+            continue;
+        }
+        let (a, b) = ((lo[axis] - origin[axis]) / dir[axis], (hi[axis] - origin[axis]) / dir[axis]);
+        near = near.max(a.min(b));
+        far = far.min(a.max(b));
+    }
+    (near <= far && far >= 0.0).then_some(near.max(0.0))
+}
+
+/// Which face of a board the arrow goes on, seen from `look`: the broad face turned towards the eye. Returns the point at
+/// the middle of that face (a hair proud of it) and its outward normal, or `None` when the board is seen edge-on.
+fn facing_side(board: &GrainBoard, look: [f64; 3]) -> Option<([f64; 3], [f64; 3])> {
+    let [thin, _, _] = board.axes();
+    let mut centre: [f64; 3] = std::array::from_fn(|axis| (board.lo[axis] + board.hi[axis]) / 2.0);
+    // The face whose outward normal points back at the eye.
+    let sign = if look[thin] > 0.0 { -1.0 } else { 1.0 };
+    if look[thin].abs() < 0.05 {
+        return None;
+    }
+    centre[thin] = if sign > 0.0 { board.hi[thin] + 0.5 } else { board.lo[thin] - 0.5 };
+    let mut normal = [0.0; 3];
+    normal[thin] = sign;
+    Some((centre, normal))
+}
+
+/// A two-way arrow on each board's face that is turned towards the eye, unless another body stands in front of it. Painted
+/// over the model rather than modelled, so it stays crisp at any zoom; the depth test is done here against the boxes, which
+/// is exact for boards.
+///
+/// While boards are selected, theirs are drawn bold and the rest faded, so it is plain which boards a turn will change.
+pub fn paint_grain(app: &mut SolveApp, painter: &egui::Painter, proj: &crate::viewport::Proj) {
     if !GRAIN_ON.load(std::sync::atomic::Ordering::Relaxed) {
         return;
     }
-    let Ok(faces) = GRAIN_FACES.lock() else { return };
+    refresh_grain(app);
+    let selected = selected_boards(app);
+    let hidden = app.session.visibility.hidden_bodies.clone();
+    let Ok(cache) = GRAIN_CACHE.lock() else { return };
     let red = egui::Color32::from_rgb(240, 40, 40);
-    for face in faces.iter() {
-        let at = solidcraft_engine::geom::Vec3::new(face.centre[0], face.centre[1], face.centre[2]);
-        let Some(mid) = proj.to_screen(at) else { continue };
-        // Which side of the board the arrow belongs on: the side the eye is looking at.
-        let (_, look) = proj.ray(mid);
-        let facing = face.normal[0] * look.x + face.normal[1] * look.y + face.normal[2] * look.z;
-        if facing > -0.05 {
+    let v3 = |p: [f64; 3]| solidcraft_engine::geom::Vec3::new(p[0], p[1], p[2]);
+    for board in &cache.boards {
+        if hidden.contains(&board.name) {
             continue;
         }
-        let step = |sign: f64| {
-            solidcraft_engine::geom::Vec3::new(
-                face.centre[0] + face.run[0] * face.half * sign,
-                face.centre[1] + face.run[1] * face.half * sign,
-                face.centre[2] + face.run[2] * face.half * sign,
-            )
+        let middle: [f64; 3] = std::array::from_fn(|axis| (board.lo[axis] + board.hi[axis]) / 2.0);
+        let Some(mid) = proj.to_screen(v3(middle)) else { continue };
+        let (_, look) = proj.ray(mid);
+        let Some((centre, _normal)) = facing_side(board, [look.x, look.y, look.z]) else { continue };
+        let run = board.run_axis();
+        let [thin, _, _] = board.axes();
+        let size = board.size();
+        // Whether a point on the face can be seen: the first thing the eye's ray meets on the way to it is this board.
+        let seen = |p: [f64; 3]| -> bool {
+            let Some(at) = proj.to_screen(v3(p)) else { return false };
+            let (origin, dir) = proj.ray(at);
+            let (origin, dir) = ([origin.x, origin.y, origin.z], [dir.x, dir.y, dir.z]);
+            let Some(to_face) = ray_hits_box(origin, dir, board.lo, board.hi) else { return false };
+            !cache.blockers.iter().any(|(name, lo, hi)| {
+                name != &board.name && !hidden.contains(name) && ray_hits_box(origin, dir, *lo, *hi).is_some_and(|t| t < to_face - 0.5)
+            })
         };
-        let (Some(a), Some(b)) = (proj.to_screen(step(1.0)), proj.to_screen(step(-1.0))) else {
-            continue;
+        // Where on the face the arrow stands, and how long it is: along the grain through the middle of the face when all
+        // of that shows, else the longest stretch of a nearby line that does - a modesty seen from behind is half under the
+        // top, and its arrow belongs on the half in sight, not on the top, and not nowhere.
+        let [u, v] = {
+            let mut others = (0..3).filter(|axis| *axis != thin);
+            [others.next().unwrap_or(0), others.next().unwrap_or(1)]
         };
+        let across_axis = if u == run { v } else { u };
+        let full = size[run] * 0.34;
+        const SAMPLES: usize = 24;
+        // The longest unbroken visible stretch of the grain line through `through`, as two points on it.
+        let stretch = |through: [f64; 3]| -> Option<([f64; 3], [f64; 3], f64)> {
+            let at = |k: usize| {
+                let mut p = through;
+                p[run] = middle[run] - size[run] * 0.45 + size[run] * 0.9 * k as f64 / SAMPLES as f64;
+                p
+            };
+            let shown: Vec<bool> = (0..=SAMPLES).map(|k| seen(at(k))).collect();
+            let (mut best, mut from) = (None::<(usize, usize)>, None::<usize>);
+            for (k, on) in shown.iter().chain(std::iter::once(&false)).enumerate() {
+                match (on, from) {
+                    (true, None) => from = Some(k),
+                    (false, Some(f)) => {
+                        if best.is_none_or(|(a, b)| k - 1 - f > b - a) {
+                            best = Some((f, k - 1));
+                        }
+                        from = None;
+                    }
+                    _ => {}
+                }
+            }
+            let (a, b) = best?;
+            let (pa, pb) = (at(a), at(b));
+            let length = (pb[run] - pa[run]).abs();
+            // No longer than the arrow on an open face, centred in the stretch, and a little in from its ends.
+            let mid_run = (pa[run] + pb[run]) / 2.0;
+            let half = (length / 2.0 * 0.9).min(full);
+            let (mut ea, mut eb) = (pa, pb);
+            ea[run] = mid_run - half;
+            eb[run] = mid_run + half;
+            Some((ea, eb, half))
+        };
+        let lines: [f64; 5] = [0.0, 0.2, -0.2, 0.35, -0.35];
+        let mut found: Option<([f64; 3], [f64; 3], f64)> = None;
+        for offset in lines {
+            let mut through = centre;
+            through[across_axis] = middle[across_axis] + size[across_axis] * offset;
+            if let Some(candidate) = stretch(through) {
+                let good = candidate.2 >= full * 0.6;
+                if found.as_ref().is_none_or(|f| candidate.2 > f.2) {
+                    found = Some(candidate);
+                }
+                if good {
+                    break;
+                }
+            }
+        }
+        // Hidden behind another body: the arrow would float over the board in front and say the wrong thing about it.
+        let Some((end_a, end_b, _)) = found else { continue };
+        let (Some(a), Some(b)) = (proj.to_screen(v3(end_a)), proj.to_screen(v3(end_b))) else { continue };
         if (b - a).length() < 18.0 {
             continue;
         }
-        two_way_arrow(painter, a, b, red);
+        let (colour, width) = if selected.is_empty() {
+            (red, 3.0)
+        } else if selected.contains(&board.name) {
+            (egui::Color32::from_rgb(255, 70, 70), 4.0)
+        } else {
+            (red.gamma_multiply(0.35), 2.0)
+        };
+        two_way_arrow(painter, a, b, colour, width);
     }
 }
 
 /// A line with a head at each end: the grain runs both ways along a board, so the arrow says "this direction", not "that way".
-fn two_way_arrow(painter: &egui::Painter, a: egui::Pos2, b: egui::Pos2, col: egui::Color32) {
+fn two_way_arrow(painter: &egui::Painter, a: egui::Pos2, b: egui::Pos2, col: egui::Color32, shaft: f32) {
     let v = b - a;
     let length = v.length();
     if length < 1.0 {
@@ -728,16 +902,11 @@ fn two_way_arrow(painter: &egui::Painter, a: egui::Pos2, b: egui::Pos2, col: egu
     }
     let u = v / length;
     let n = egui::vec2(-u.y, u.x);
-    let head = 16.0f32.min(length * 0.45);
-    let shaft = 3.0;
+    let head = (14.0 + shaft * 1.5).min(length * 0.45);
     painter.line_segment([a + u * head * 0.5, b - u * head * 0.5], egui::Stroke::new(shaft, col));
     for (tip, back) in [(a, u), (b, -u)] {
         painter.add(egui::Shape::convex_polygon(
-            vec![
-                tip,
-                tip + back * head - n * head * 0.5,
-                tip + back * head + n * head * 0.5,
-            ],
+            vec![tip, tip + back * head - n * head * 0.5, tip + back * head + n * head * 0.5],
             col,
             egui::Stroke::NONE,
         ));
@@ -1169,15 +1338,24 @@ fn board_dropdown(ui: &mut egui::Ui, rect: Rect, groups: &[(Option<String>, Vec<
 }
 
 /// The `Skin ▾` button: folder, then material, and the choice skins every selected body in that board's colour and material.
-/// Show the grain, or turn it round. One menu rather than two buttons, so "flip" reads as something done *to* the grain rather
-/// than as a separate mode that happens to be next to it.
+/// Show the grain, or turn it on the boards picked. One menu, so a turn reads as something done *to* the grain.
+///
+/// A turn only ever touches the selected boards: with nothing picked the item says so and is disabled, because turning the
+/// whole drawing by accident is the mistake the first version made on every click. Each selected board swaps on its own,
+/// so a top and a side picked together each turn. "All boards along their length" is the one way to change them all.
 fn grain_menu(app: &mut SolveApp, ui: &mut egui::Ui, rect: Rect) {
     let on = GRAIN_ON.load(std::sync::atomic::Ordering::Relaxed);
+    if on {
+        refresh_grain(app);
+    }
     let response = ribbon_button_icon(ui, "grain", rect, "Grain", true, false, Some("material"));
     let open = egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&response));
     let response = ribbon_button_icon(ui, "grain", rect, "Grain", true, open, Some("material"));
+    let chosen = if open { selected_boards(app) } else { Vec::new() };
+    let any_turned = GRAIN_CACHE.lock().map(|cache| cache.boards.iter().any(|b| b.across)).unwrap_or(false);
     let mut show: Option<bool> = None;
-    let mut flip = false;
+    let mut turn = false;
+    let mut reset = false;
     egui::Popup::menu(&response)
         .frame(crate::ui_kit::Container::menu_frame())
         .show(|ui| {
@@ -1187,39 +1365,57 @@ fn grain_menu(app: &mut SolveApp, ui: &mut egui::Ui, rect: Rect) {
                 show = Some(!on);
                 egui::Popup::close_all(ui.ctx());
             }
-            let row = ui.selectable_label(false, "Flip grain direction");
+            ui.separator();
+            let label = match chosen.len() {
+                0 => "Turn grain on selected boards".to_owned(),
+                1 => format!("Turn grain on {}", chosen[0]),
+                n => format!("Turn grain on {n} selected boards"),
+            };
+            let row = ui
+                .add_enabled(!chosen.is_empty(), egui::Button::new(label).frame(false))
+                .on_disabled_hover_text("Select a board first - click it, or Ctrl+click several - then turn its grain.");
             crate::scenario::publish_handle("ledger:grain_flip", row.rect.center());
             if row.clicked() {
-                flip = true;
+                turn = true;
+                egui::Popup::close_all(ui.ctx());
+            }
+            let row = ui
+                .add_enabled(any_turned, egui::Button::new("All boards along their length").frame(false))
+                .on_hover_text("Put every turned board back to grain along its long side");
+            if row.clicked() {
+                reset = true;
                 egui::Popup::close_all(ui.ctx());
             }
         });
     if let Some(wanted) = show {
         GRAIN_ON.store(wanted, std::sync::atomic::Ordering::Relaxed);
         if wanted {
-            // Designs made with the first version carry strip bodies; the arrows are painted, so those are swept away here.
             clear_grain(app);
-            draw_grain(app);
+            refresh_grain(app);
+            let count = GRAIN_CACHE.lock().map(|c| c.boards.len()).unwrap_or(0);
+            app.set_status(format!("grain shown on {count} {}", if count == 1 { "board" } else { "boards" }), false);
         } else {
-            clear_grain(app);
-            app.set_status("grain: off", false);
+            app.set_status("grain hidden", false);
         }
     }
-    if flip {
-        // The selection first: a board turned round is a decision about that board. With nothing selected the whole drawing
-        // turns, which is what a shop means by "flip the grain" when it has not picked anything out.
-        let chosen = selected_bodies(app);
-        let targets = if chosen.is_empty() {
-            app.session.world_state().bodies.iter().map(|b| b.name.clone()).collect()
-        } else {
-            chosen
-        };
-        toggle_grain(&targets);
-        clear_grain(app);
-        if GRAIN_ON.load(std::sync::atomic::Ordering::Relaxed) {
-            draw_grain(app);
-        } else {
-            app.set_status("grain is off: show it first", true);
+    if turn || reset {
+        let names = if turn { Some(chosen.as_slice()) } else { None };
+        match turn_grain(app, names) {
+            Ok(count) => {
+                // A turn is something to look at: the arrows come on with it.
+                GRAIN_ON.store(true, std::sync::atomic::Ordering::Relaxed);
+                refresh_grain(app);
+                let what = if turn {
+                    match chosen.as_slice() {
+                        [one] => format!("grain turned on {one}"),
+                        _ => format!("grain turned on {count} boards"),
+                    }
+                } else {
+                    format!("{count} {} back to grain along the length", if count == 1 { "board" } else { "boards" })
+                };
+                app.set_status(format!("{what} - Ctrl+Z undoes it"), false);
+            }
+            Err(error) => app.set_status(format!("grain not changed: {error}"), true),
         }
     }
 }
@@ -1661,6 +1857,58 @@ fn ensure_material(app: &mut SolveApp, name: &str, density: f64, colour: &str) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The SOL-DKS-2448 desk as measured: the top, the modesty and the two legs are boards; a cam block and a glide are not.
+    #[test]
+    fn the_grain_goes_on_boards_and_follows_the_turned_list() {
+        let measured = serde_json::json!({"bodies": [
+            {"name": "Part (2)", "bbox": {"min": [0.0, -600.07, 736.6], "max": [1200.15, 0.0, 762.0]}},
+            {"name": "Part (9)", "bbox": {"min": [20.6, -590.6, 7.0], "max": [1179.1, -571.55, 736.6]}},
+            {"name": "Part (10)", "bbox": {"min": [1179.1, -600.1, 7.0], "max": [1198.15, -0.02, 736.6]}},
+            {"name": "cam 1", "bbox": {"min": [13.1, -588.0, 243.1], "max": [28.1, -573.0, 257.3]}},
+            {"name": "Part (3)", "bbox": {"min": [0.4, -458.3, -1.8], "max": [21.7, -437.0, 8.7]}},
+            {"name": "grain 1", "bbox": {"min": [0.0, 0.0, 0.0], "max": [100.0, 100.0, 1.0]}}
+        ]});
+        let across: std::collections::BTreeSet<String> = ["Part (9)".to_owned()].into();
+        let boards = grain_boards(&measured, &across);
+        let names: Vec<&str> = boards.iter().map(|b| b.name.as_str()).collect();
+        assert_eq!(names, ["Part (2)", "Part (9)", "Part (10)"]);
+        // The top runs along its 1200 mm (x); the modesty is turned, so it runs up its 729.6 mm (z), not along its 1158 mm.
+        assert_eq!(boards[0].run_axis(), 0);
+        assert_eq!(boards[1].run_axis(), 2);
+        // The leg runs up its height: 729.6 (z) is longer than its 600 (y).
+        assert_eq!(boards[2].run_axis(), 2);
+    }
+
+    /// The arrow goes on the face turned towards the eye - the near side of the modesty from the front, the far side from
+    /// behind - and on neither when the board is seen edge-on.
+    #[test]
+    fn the_arrow_sits_on_the_face_the_eye_sees() {
+        let modesty = GrainBoard { name: "M".into(), lo: [0.0, -590.6, 7.0], hi: [1158.0, -571.55, 736.6], across: false };
+        let (front, normal) = facing_side(&modesty, [0.2, 0.9, -0.3]).expect("seen from the front");
+        assert!(front[1] < -590.6 && normal[1] < 0.0, "{front:?}");
+        let (back, normal) = facing_side(&modesty, [0.2, -0.9, -0.3]).expect("seen from behind");
+        assert!(back[1] > -571.55 && normal[1] > 0.0, "{back:?}");
+        assert!(facing_side(&modesty, [1.0, 0.0, 0.0]).is_none(), "edge-on");
+    }
+
+    /// A body between the eye and a board hides the board's arrow; one beside the line of sight does not.
+    #[test]
+    fn a_ray_meets_the_boxes_in_its_way() {
+        let (origin, dir) = ([0.0, -2000.0, 0.0], [0.0, 1.0, 0.0]);
+        assert_eq!(ray_hits_box(origin, dir, [-10.0, -100.0, -10.0], [10.0, 0.0, 10.0]), Some(1900.0));
+        assert_eq!(ray_hits_box(origin, dir, [50.0, -100.0, -10.0], [70.0, 0.0, 10.0]), None);
+        assert_eq!(ray_hits_box(origin, [0.0, -1.0, 0.0], [-10.0, -100.0, -10.0], [10.0, 0.0, 10.0]), None, "behind the eye");
+    }
+
+    /// The turned list is read from the design's metadata, and a design without one turns nothing.
+    #[test]
+    fn the_turned_list_is_read_from_the_design() {
+        let meta = serde_json::json!({"boards": {}, "grain_across": ["Part (9)", "Part (10)"]});
+        let turned = turned_in(meta.as_object().expect("an object"));
+        assert!(turned.contains("Part (9)") && turned.contains("Part (10)") && turned.len() == 2);
+        assert!(turned_in(&serde_json::Map::new()).is_empty());
+    }
 
     /// `/2` adds the folder a board is filed in; `/1` still reads, so an older Ledger keeps working.
     #[test]
