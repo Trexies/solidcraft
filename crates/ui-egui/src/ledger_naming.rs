@@ -81,7 +81,9 @@ fn describe(body: &Box3, whole: [f64; 3], lo: [f64; 3], hi: [f64; 3]) -> Option<
     if body.volume > 0.0 && box_volume > 0.0 && body.volume / box_volume < 0.35 {
         return None;
     }
-    let mid = [whole[0] / 2.0, whole[1] / 2.0];
+    // Front/rear and left/right against the middle of the piece itself - not half its size, which is only the middle when
+    // the drawing starts at the origin (SOL-DKS-2448 runs from y = -600 to 0, so every leg read "front").
+    let mid = [(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0];
     let at_low = |axis: usize, share: f64| centre[axis] <= lo[axis] + whole[axis] * share;
     let at_high = |axis: usize, share: f64| centre[axis] >= hi[axis] - whole[axis] * share;
     let spans = |axis: usize, share: f64| size[axis] >= whole[axis] * share;
@@ -201,35 +203,79 @@ pub fn name_parts(app: &mut crate::SolveApp) -> (usize, usize) {
             };
         }
     }
-    let mut used: Vec<String> = Vec::new();
-    let mut named = 0usize;
+    // A body that keeps its present name - a marker, or one the shape cannot name - holds it: no other body is given it.
+    let mut used: Vec<String> =
+        bodies.iter().zip(&wanted).filter(|(_, want)| *want == "unnamed").map(|(body, _)| body.name.clone()).collect();
     let mut unnamed = 0usize;
-    for (body, wanted) in bodies.iter().zip(wanted.into_iter()) {
-        let mut name = wanted.clone();
-        let mut repeat = 2;
-        while wanted != "unnamed" && used.contains(&name) {
-            name = format!("{wanted} ({repeat})");
-            repeat += 1;
+    let mut plan: Vec<(usize, String, String)> = Vec::new();
+    for (index, (body, want)) in bodies.iter().zip(&wanted).enumerate() {
+        if want == "unnamed" {
+            // A marker is named already; only a body the shape could not place is reported as left as a number.
+            unnamed += usize::from(!marker(&body.name));
+            continue;
         }
+        let name = next_free(want, &used);
         used.push(name.clone());
-        if name == "unnamed" {
-            unnamed += 1;
-            continue;
+        if name != body.name {
+            plan.push((index, want.clone(), name));
         }
-        if name == body.name {
-            continue;
-        }
-        let done = app
-            .session
-            .execute("body.rename", &json!({ "body": body.name, "name": name }))
-            .is_ok();
-        if done {
-            named += 1;
+    }
+    used.extend(bodies.iter().map(|body| body.name.clone()));
+    // Two passes: every body that changes first steps aside to a name no one has, then takes its own. In one pass two legs
+    // trading names refuse each other ("another body is called ...") and both keep the old, wrong one.
+    let mut aside: Vec<(usize, String, String, String)> = Vec::new();
+    for (step, (index, base, name)) in plan.into_iter().enumerate() {
+        let temp = format!("~naming {step}");
+        if rename(app, &bodies[index].name, &temp) {
+            aside.push((index, temp, base, name));
         } else {
             unnamed += 1;
         }
     }
+    let mut named = 0usize;
+    let mut renamed: Vec<(String, String)> = Vec::new();
+    for (index, temp, base, mut name) in aside {
+        let old = bodies[index].name.clone();
+        let mut placed = false;
+        // A name a Remove feature still holds (a band merged away, say) is refused for good: take the next number instead.
+        for _ in 0..20 {
+            if rename(app, &temp, &name) {
+                placed = true;
+                break;
+            }
+            used.push(name.clone());
+            name = next_free(&base, &used);
+        }
+        if placed {
+            named += 1;
+            renamed.push((old, name));
+        } else {
+            unnamed += 1;
+            if !rename(app, &temp, &old) {
+                renamed.push((old, temp));
+            }
+        }
+    }
+    // The design's records of each board - its sheet limits and its turned grain - are kept by body name: they follow.
+    if !renamed.is_empty() {
+        crate::ledger_boards::follow_renames(app, &renamed);
+    }
     (named, unnamed)
+}
+
+fn rename(app: &mut crate::SolveApp, from: &str, to: &str) -> bool {
+    app.session.execute("body.rename", &json!({ "body": from, "name": to })).is_ok()
+}
+
+/// `base` when no body is called that, else the first free `base (2)`, `base (3)`, …
+fn next_free(base: &str, used: &[String]) -> String {
+    if !used.iter().any(|name| name == base) {
+        return base.to_owned();
+    }
+    (2..)
+        .map(|n| format!("{base} ({n})"))
+        .find(|name| !used.contains(name))
+        .expect("a free number")
 }
 
 #[cfg(test)]
@@ -252,5 +298,22 @@ mod tests {
         // The same block up in the air is not a foot, and not a board either.
         let high = block("Part (7)", [0.4, -458.3, 300.0], [21.7, -437.0, 310.5]);
         assert_eq!(describe(&high, whole, lo, hi), None);
+    }
+
+    /// The same desk's legs: off the origin in Y, each still names its own corner.
+    #[test]
+    fn legs_name_their_corner_when_the_drawing_is_off_the_origin() {
+        let (lo, hi) = ([0.0, -600.0, 0.0], [1200.0, 0.0, 762.0]);
+        let whole = [hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]];
+        let leg = |x: f64, y: f64| block("leg", [x, y, 0.0], [x + 19.0, y + 100.0, 736.6]);
+        assert_eq!(describe(&leg(0.0, -600.0), whole, lo, hi).as_deref(), Some("leg - front left"));
+        assert_eq!(describe(&leg(1181.0, -100.0), whole, lo, hi).as_deref(), Some("leg - rear right"));
+    }
+
+    #[test]
+    fn a_taken_name_gets_the_next_number() {
+        let used = vec!["side".to_owned(), "side (2)".to_owned()];
+        assert_eq!(next_free("side", &used), "side (3)");
+        assert_eq!(next_free("top", &used), "top");
     }
 }

@@ -91,6 +91,47 @@ fn ledger_meta(app: &mut SolveApp) -> serde_json::Map<String, serde_json::Value>
         .unwrap_or_default()
 }
 
+/// Carry the design's records across renames: a board's sheet limits and its turned grain are both kept by body name, so
+/// without this Name parts quietly dropped every board's limits and turned every turned board back.
+pub(crate) fn follow_renames(app: &mut SolveApp, renamed: &[(String, String)]) {
+    let meta = ledger_meta(app);
+    if meta.is_empty() {
+        return;
+    }
+    let moved = renamed_records(meta, renamed);
+    let _ = app.run("document.metadata.set", json!({ "values": { KEY: moved } }));
+}
+
+/// The records with every renamed body's entries under its new name; entries for bodies not renamed stay as they were.
+fn renamed_records(
+    mut meta: serde_json::Map<String, serde_json::Value>,
+    renamed: &[(String, String)],
+) -> serde_json::Map<String, serde_json::Value> {
+    let new_of = |name: &str| renamed.iter().find(|(old, _)| old == name).map(|(_, new)| new.clone());
+    if let Some(boards) = meta.get("boards").and_then(serde_json::Value::as_object).cloned() {
+        let mut out = serde_json::Map::new();
+        // The ones staying first, the renamed after: a renamed board's record wins any stale entry under its new name.
+        for (name, tag) in boards.iter().filter(|(name, _)| new_of(name).is_none()) {
+            out.insert(name.clone(), tag.clone());
+        }
+        for (name, tag) in &boards {
+            if let Some(new) = new_of(name) {
+                out.insert(new, tag.clone());
+            }
+        }
+        meta.insert("boards".to_owned(), serde_json::Value::Object(out));
+    }
+    if let Some(list) = meta.get(GRAIN_KEY).and_then(serde_json::Value::as_array).cloned() {
+        let turned: std::collections::BTreeSet<String> = list
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .map(|name| new_of(name).unwrap_or_else(|| name.to_owned()))
+            .collect();
+        meta.insert(GRAIN_KEY.to_owned(), json!(turned.into_iter().collect::<Vec<_>>()));
+    }
+    meta
+}
+
 /// Record a board's limits in the design, under the name of the body that carries it.
 ///
 /// `width`/`height` are what was cut; `max_width`/`max_height` are the sheet it came from, which is the cap that matters: a
@@ -1906,6 +1947,15 @@ mod tests {
     #[test]
     fn the_turned_list_is_read_from_the_design() {
         let meta = serde_json::json!({"boards": {}, "grain_across": ["Part (9)", "Part (10)"]});
+        // A rename carries the turn and the sheet limits with it, and two bodies trading names trade their records too.
+        let records = serde_json::json!({"boards": {"Part (10)": {"material": "Asian Night"}, "side": {"material": "Classic White"}},
+            "grain_across": ["Part (9)", "side"]});
+        let renamed = vec![("Part (10)".to_owned(), "side".to_owned()), ("side".to_owned(), "side (2)".to_owned()),
+            ("Part (9)".to_owned(), "panel - front".to_owned())];
+        let moved = renamed_records(records.as_object().cloned().unwrap(), &renamed);
+        assert_eq!(moved["boards"]["side"]["material"], "Asian Night");
+        assert_eq!(moved["boards"]["side (2)"]["material"], "Classic White");
+        assert_eq!(moved["grain_across"], serde_json::json!(["panel - front", "side (2)"]));
         let turned = turned_in(meta.as_object().expect("an object"));
         assert!(turned.contains("Part (9)") && turned.contains("Part (10)") && turned.len() == 2);
         assert!(turned_in(&serde_json::Map::new()).is_empty());
