@@ -1615,11 +1615,46 @@ fn selected_bodies(app: &SolveApp) -> Vec<String> {
 }
 
 /// Skin each body in one of the shop's boards: the material the audit reads, and the colour the model is drawn in.
+///
+/// SolidCraft assigns a physical material by name, and only one the design already defines. A design opened from Ledger's
+/// folder carries the materials that existed when it was saved, so a board the shop added later is missing from it: the
+/// material is created first, exactly as `insert` does. A board with no density in Ledger cannot be one - the shop does not
+/// guess weights - so it is drawn in its colour and the status line says what is missing, instead of an error toast.
 fn skin_bodies(app: &mut SolveApp, board: &Board, bodies: &[String]) {
+    let plural = if bodies.len() == 1 { "y" } else { "ies" };
+    let Some(density) = board.density_g_cm3 else {
+        let _ = app.run("appearance.assign", json!({ "bodies": bodies, "color": board.colour }));
+        app.set_status(
+            format!(
+                "{} bod{plural} coloured {} - no physical material yet: give {} a density in Ledger (Hardware & Materials) so it counts in weights",
+                bodies.len(),
+                board.material,
+                board.material
+            ),
+            false,
+        );
+        return;
+    };
+    match ensure_material(app, &board.material, density, &board.colour) {
+        Ok(()) => {}
+        Err(error) => {
+            app.set_status(format!("{} could not be added to this design: {error}", board.material), true);
+            return;
+        }
+    }
     if app.run("material.assign", json!({ "bodies": bodies, "material": board.material })).is_ok() {
         let _ = app.run("appearance.assign", json!({ "bodies": bodies, "color": board.colour }));
-        app.set_status(format!("{} bod{} skinned in {}", bodies.len(), if bodies.len() == 1 { "y" } else { "ies" }, board.material), false);
+        app.set_status(format!("{} bod{plural} skinned in {}", bodies.len(), board.material), false);
     }
+}
+
+/// Define a physical material in the open design unless it already is.
+fn ensure_material(app: &mut SolveApp, name: &str, density: f64, colour: &str) -> Result<(), String> {
+    let listed = app.run("material.list", json!({}))?;
+    if !listed_has(&listed, name) {
+        app.run("material.create", json!({ "name": name, "density_g_cm3": density, "color": colour }))?;
+    }
+    Ok(())
 }
 
 
