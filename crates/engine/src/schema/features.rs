@@ -367,6 +367,25 @@ pub struct ScaleParams {
     pub participants: Option<StringList>,
 }
 
+/// Dissolve a body's coplanar faces and join the seam edges a union left.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[schemars(deny_unknown_fields)]
+pub struct HealParams {
+    /// The body to heal.
+    pub body: String,
+    /// The characteristic size the kernel's tolerances are taken from. Default: the body's
+    /// own. Too small a value merges nothing (the tolerance is a fraction of it).
+    #[serde(default)]
+    pub size: Option<LengthExpr>,
+    /// The feature's name in the timeline.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// The bodies taking part, which every feature records; each an existing body or `*`. A heal
+    /// changes only `body`, whatever this lists.
+    #[serde(default)]
+    pub participants: Option<StringList>,
+}
+
 /// What a feature command returns.
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct FeatureResult {

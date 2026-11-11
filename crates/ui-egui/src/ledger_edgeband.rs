@@ -84,18 +84,32 @@ fn boxes(value: &Value) -> Vec<Box3> {
     out
 }
 
-/// Join every band that can be joined. Answers (joined, removed, left alone).
+/// What the pass did: bands joined into their panels, hollow shells removed, bands left alone,
+/// and — of the joined panels — how many the heal could clean and how many seam faces and edges
+/// it dissolved.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Report {
+    pub joined: usize,
+    pub removed: usize,
+    pub left: usize,
+    pub healed: usize,
+    pub faces_dissolved: usize,
+    pub edges_dissolved: usize,
+}
+
+/// Join every band that can be joined.
 ///
 /// A band drawn as a hollow shell shares faces with its panel, and the kernel has no closed solid to join: it returns nothing
 /// however the pair is offered. Such a band is **removed** instead - it sits on the panel's own faces, so deleting it leaves the
 /// panel exactly as drawn and no gap - and its count is reported, never hidden.
-pub fn merge(app: &mut crate::SolveApp) -> (usize, usize, usize) {
+pub fn merge(app: &mut crate::SolveApp) -> Report {
+    let mut report = Report::default();
     let Ok(measured) = app.session.execute("inspect.measure", &json!({})) else {
-        return (0, 0, 0);
+        return report;
     };
     let bodies = boxes(&measured);
     if bodies.len() < 2 {
-        return (0, 0, 0);
+        return report;
     }
     // Thinnest first, so a band is joined to a panel rather than to another band.
     let mut order: Vec<usize> = (0..bodies.len()).collect();
@@ -107,6 +121,8 @@ pub fn merge(app: &mut crate::SolveApp) -> (usize, usize, usize) {
     let mut merged = 0usize;
     let mut removed = 0usize;
     let mut left = 0usize;
+    // The panels a band went into, each once: healed at the end of the pass, not per strip.
+    let mut panels: Vec<String> = Vec::new();
     for index in order {
         if gone[index] {
             continue;
@@ -159,6 +175,9 @@ pub fn merge(app: &mut crate::SolveApp) -> (usize, usize, usize) {
             if joined {
                 merged += 1;
                 gone[index] = true;
+                if !panels.contains(&bodies[partner].name) {
+                    panels.push(bodies[partner].name.clone());
+                }
             } else if is_shell(band) {
                 // Coincident and hollow: there is no solid to join, and removing it leaves the panel exactly as drawn.
                 let gone_ok = app
@@ -224,6 +243,9 @@ pub fn merge(app: &mut crate::SolveApp) -> (usize, usize, usize) {
         if joined {
             merged += 1;
             gone[index] = true;
+            if !panels.contains(&bodies[panel].name) {
+                panels.push(bodies[panel].name.clone());
+            }
         } else if is_shell(band) {
             let gone_ok = app
                 .session
@@ -239,7 +261,23 @@ pub fn merge(app: &mut crate::SolveApp) -> (usize, usize, usize) {
             left += 1;
         }
     }
-    (merged, removed, left)
+    // The union leaves the seam where each strip's faces meet the panel's on one plane: coplanar
+    // in fact, but split. Healing dissolves those faces into one and joins the edges between
+    // them, so the panel draws as the one board it is. A band drawn proud of the face is a real
+    // step and stays one - the kernel only merges what lies on one plane.
+    for name in &panels {
+        let Ok(reply) = app.session.execute("solid.heal", &json!({ "body": name })) else {
+            continue;
+        };
+        let dissolved = |key: &str| reply.get(key).and_then(Value::as_u64).unwrap_or(0) as usize;
+        report.healed += 1;
+        report.faces_dissolved += dissolved("faces_dissolved");
+        report.edges_dissolved += dissolved("edges_dissolved");
+    }
+    report.joined = merged;
+    report.removed = removed;
+    report.left = left;
+    report
 }
 
 /// A band that fills only part of its own box is a hollow shell - the drawing's way of drawing an edge, not a solid strip.

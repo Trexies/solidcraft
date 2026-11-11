@@ -475,6 +475,39 @@ pub(crate) fn planar_surfaces(shell: &mt::Shell, tol: f64) -> Option<mt::Shell> 
     changed.then(|| faces.into())
 }
 
+/// Merge coplanar neighbouring faces and join the straight edges they leave split in line;
+/// returns the input unchanged when nothing applies (or healing fails).
+///
+/// This is what a boolean result gets automatically; it is here for callers that join solids
+/// through several features and are left with the boundary edges a union leaves where one
+/// solid's faces meet another's on the same plane (edgebanding strips merged into a panel).
+pub fn dissolve_coplanar(solid: Solid, size: f64) -> Solid {
+    healed(solid, size, &[], false, false).0
+}
+
+/// What [`dissolve_body`] made of a body.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Dissolve {
+    /// Nothing on this body lies on one plane twice: it was left as it was.
+    Unchanged,
+    /// Faces were merged (or edges joined) and the body is the healed one.
+    Merged,
+    /// The kernel refused (an edge of the body does not evaluate): the body is as it was.
+    Refused,
+}
+
+/// [`dissolve_coplanar`] keeping the body's history (what each face and edge was made from):
+/// for a feature that heals a body in the timeline, saying what it did.
+pub fn dissolve_body(body: &crate::Body, size: f64) -> (crate::Body, Dissolve) {
+    let counts = crate::record::counts(&[body]);
+    let solid: Solid = (*body.solid).clone();
+    match crate::guard("dissolve", || crate::boolean_record::heal_body(body, solid, size, &[], &counts)) {
+        Ok(healed) if healed.face_count() != body.face_count() || healed.edge_count() != body.edge_count() => (healed, Dissolve::Merged),
+        Ok(_) => (body.clone(), Dissolve::Unchanged),
+        Err(_) => (body.clone(), Dissolve::Refused),
+    }
+}
+
 /// Heal a solid; returns the input unchanged when nothing applies or healing fails.
 #[cfg(test)]
 pub fn heal(solid: Solid, size: f64) -> Solid {
@@ -699,6 +732,39 @@ mod tests {
         let healed = heal(strip_prism(3), 3.0);
         let shell = healed.boundaries().first().expect("a shell").clone();
         assert_eq!(counts(&shell), (6, 12, 8));
+    }
+
+    /// Two boxes joined on a whole face are one box already: the kernel heals every boolean, so
+    /// a join does not leave the seam of two coplanar faces behind (checked, not assumed: the
+    /// healing a caller might reach for after a join finds nothing to do).
+    #[test]
+    fn a_join_leaves_no_coplanar_seam_to_dissolve() {
+        use crate::BoolOp;
+        let a = crate::box_solid(Vec3::ZERO, Vec3::new(10.0, 10.0, 10.0)).expect("a box");
+        let b = crate::box_solid(Vec3::new(10.0, 0.0, 0.0), Vec3::new(20.0, 10.0, 10.0)).expect("a box");
+        let joined = crate::boolean(&a, &b, BoolOp::Union).expect("a union").expect("a solid");
+        assert_eq!((joined.face_count(), joined.edge_count()), (6, 12));
+        let dissolved = Body::new(dissolve_coplanar((*joined.solid).clone(), joined.size())).expect("a body");
+        assert_eq!((dissolved.face_count(), dissolved.edge_count()), (6, 12));
+    }
+
+    /// A face split along a line (Split Face, or a CAD drawing's own split faces) leaves two
+    /// coplanar faces sharing an edge - the seam a caller sees. Dissolving merges them into one
+    /// face, joins the edges the pieces left split in line, and keeps the volume exactly.
+    #[test]
+    fn dissolve_merges_coplanar_faces_a_split_left() {
+        let body = crate::box_solid(Vec3::ZERO, Vec3::new(10.0, 10.0, 10.0)).expect("a box");
+        let top = body.solid.face_iter().position(|f| plane_of(f).is_some_and(|(n, d)| n.z > 0.99 && (d - 10.0).abs() < 1e-9)).expect("the top face");
+        let plane = solidcraft_geom::Plane { origin: Vec3::new(5.0, 0.0, 0.0), x: Vec3::new(0.0, 1.0, 0.0), y: Vec3::new(0.0, 0.0, 1.0) };
+        let split = crate::split_faces(&body, &[top], &crate::SplitTool::Plane(plane)).expect("a split");
+        let (faces, edges) = (split.face_count(), split.edge_count());
+        assert_eq!(faces, 7, "the split leaves two coplanar pieces");
+        let volume = crate::measure::measure(&split).expect("measures").volume;
+        let dissolved = Body::new(dissolve_coplanar((*split.solid).clone(), split.size())).expect("a body");
+        assert_eq!(dissolved.face_count(), faces - 1, "faces {faces} -> {}", dissolved.face_count());
+        assert!(dissolved.edge_count() < edges, "edges {edges} -> {}", dissolved.edge_count());
+        let after = crate::measure::measure(&dissolved).expect("measures").volume;
+        assert!((after - volume).abs() < 1e-6 * volume, "{after} vs {volume}");
     }
 
     #[test]

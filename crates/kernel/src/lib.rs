@@ -182,6 +182,7 @@ pub use fair::{
 };
 pub use fill::{PATCH_ANGLE_TOL_DEG, PatchReport, PatchSpec, patch_edges_crowned, patch_edges_report, patch_edges_with};
 pub use helix::{loft_to_point, sweep_helix, sweep_helix_mesh};
+pub use heal::{Dissolve, dissolve_body, dissolve_coplanar};
 pub use iges_in::{MAX_IGES_BYTES, iges_import, iges_to_step};
 pub use iges_out::iges_export_bodies;
 pub use lip::{raise_band, rim_band};

@@ -7869,6 +7869,23 @@ fn eval_feature(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, st:
             }
             Ok(())
         }
+        FeatureKind::Heal { body, size } => {
+            let i = st.bodies.iter().position(|b| &b.name == body).ok_or_else(|| DocError::Unknown(format!("body `{body}`")))?;
+            let Some(mb) = st.bodies.get(i).cloned() else { return Err(DocError::Invalid("body".into())) };
+            let size = match size {
+                Some(e) => val(vals, e, Kind::Length)?,
+                None => mb.body.size(),
+            };
+            let (healed, done) = kernel::dissolve_body(&mb.body, size);
+            if done == kernel::Dissolve::Refused {
+                append_warning(warning, format!("`{}` could not be healed: an edge of it does not evaluate", mb.name));
+            }
+            let nb = Traced::step(healed, &[&mb.traced()]);
+            if let Some(slot) = st.bodies.get_mut(i) {
+                *slot = ModelBody::traced_new(mb.name, nb, mb.feature);
+            }
+            Ok(())
+        }
         FeatureKind::FrameMember { .. } => frame_member::evaluate(doc, vals, f, st),
         FeatureKind::BoundingSolid { bodies, margin } => {
             let m = val(vals, margin, Kind::Length)?;

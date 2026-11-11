@@ -1408,22 +1408,33 @@ pub fn ribbon(app: &mut SolveApp, ui: &mut egui::Ui, area: Rect) {
         if ribbon_button_icon(ui, id, rect, label, false, false, Some(icon)).clicked() {
             match *id {
                 "bands" => {
-                    let (merged, removed, left) = crate::ledger_edgeband::merge(app);
+                    let report = crate::ledger_edgeband::merge(app);
                     let mut parts: Vec<String> = Vec::new();
-                    if merged > 0 {
+                    if report.joined > 0 {
                         parts.push(format!(
-                            "{merged} edgebanding {} merged",
-                            if merged == 1 { "shell" } else { "shells" }
+                            "{} edgebanding {} merged",
+                            report.joined,
+                            if report.joined == 1 { "shell" } else { "shells" }
                         ));
                     }
-                    if removed > 0 {
+                    if report.edges_dissolved > 0 {
                         parts.push(format!(
-                            "{removed} hollow {} removed (shell geometry cannot be joined)",
-                            if removed == 1 { "band" } else { "bands" }
+                            "dissolved {} seam {}, {} coplanar {}",
+                            report.edges_dissolved,
+                            if report.edges_dissolved == 1 { "edge" } else { "edges" },
+                            report.faces_dissolved,
+                            if report.faces_dissolved == 1 { "face" } else { "faces" }
                         ));
                     }
-                    if left > 0 {
-                        parts.push(format!("{left} left alone"));
+                    if report.removed > 0 {
+                        parts.push(format!(
+                            "{} hollow {} removed (shell geometry cannot be joined)",
+                            report.removed,
+                            if report.removed == 1 { "band" } else { "bands" }
+                        ));
+                    }
+                    if report.left > 0 {
+                        parts.push(format!("{} left alone", report.left));
                     }
                     app.set_status(
                         if parts.is_empty() {

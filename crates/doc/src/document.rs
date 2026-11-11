@@ -1407,6 +1407,17 @@ pub enum FeatureKind {
     Remove {
         bodies: Vec<BodyName>,
     },
+    /// Dissolve a body's coplanar faces into one and join the edges they left split in line: the
+    /// seam a union leaves where one solid's faces meet another's on the same plane (an
+    /// edgebanding strip merged into its panel). A genuine step stays.
+    Heal {
+        body: BodyName,
+        /// The characteristic size the kernel's tolerances are taken from (default: the body's
+        /// own); a value too small for the body merges nothing.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[walk(length = "Size")]
+        size: Option<Expr>,
+    },
     /// Surface bodies: planar patches filling sketch regions (`profiles` of `sketch`), or a
     /// closed loop of a body's edges (`edges`: points on them, on `body`).
     Patch {
@@ -2385,6 +2396,7 @@ impl FeatureKind {
             FeatureKind::ReplaceFace { .. } => "ReplaceFaceFeature",
             FeatureKind::Align { .. } => "AlignFeature",
             FeatureKind::Remove { .. } => "RemoveFeature",
+            FeatureKind::Heal { .. } => "HealFeature",
             FeatureKind::Patch { .. } => "PatchFeature",
             FeatureKind::SurfaceExtrude { .. } => "SurfaceExtrudeFeature",
             FeatureKind::SurfaceRevolve { .. } => "SurfaceRevolveFeature",
@@ -2468,6 +2480,7 @@ impl FeatureKind {
             FeatureKind::ReplaceFace { .. } => "ReplaceFace",
             FeatureKind::Align { .. } => "Align",
             FeatureKind::Remove { .. } => "Remove",
+            FeatureKind::Heal { .. } => "Heal",
             FeatureKind::Patch { .. } => "Patch",
             FeatureKind::SurfaceExtrude { .. } => "SurfaceExtrude",
             FeatureKind::SurfaceRevolve { .. } => "SurfaceRevolve",

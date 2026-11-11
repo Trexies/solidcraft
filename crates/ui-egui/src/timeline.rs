@@ -177,6 +177,7 @@ pub(crate) fn icon_of(k: &FeatureKind) -> &'static str {
         FeatureKind::OffsetFace { .. } => "offset_face",
         FeatureKind::DeleteFace { .. } => "delete_face",
         FeatureKind::Remove { .. } => "delete",
+        FeatureKind::Heal { .. } => "combine",
         FeatureKind::BoundingSolid { .. } => "bounding_solid",
         FeatureKind::Pipe { .. } => "pipe",
         FeatureKind::FrameMember { .. } => "frame_member",
