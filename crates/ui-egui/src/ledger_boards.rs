@@ -91,6 +91,13 @@ fn ledger_meta(app: &mut SolveApp) -> serde_json::Map<String, serde_json::Value>
         .unwrap_or_default()
 }
 
+/// Set one entry under `shop.ledger`, keeping every other: the hole list beside the boards and the turned grain.
+pub(crate) fn set_ledger_entry(app: &mut SolveApp, key: &str, value: serde_json::Value) {
+    let mut meta = ledger_meta(app);
+    meta.insert(key.to_owned(), value);
+    let _ = app.run("document.metadata.set", json!({ "values": { KEY: meta } }));
+}
+
 /// Carry the design's records across renames: a board's sheet limits and its turned grain are both kept by body name, so
 /// without this Name parts quietly dropped every board's limits and turned every turned board back.
 pub(crate) fn follow_renames(app: &mut SolveApp, renamed: &[(String, String)]) {
@@ -128,6 +135,14 @@ fn renamed_records(
             .map(|name| new_of(name).unwrap_or_else(|| name.to_owned()))
             .collect();
         meta.insert(GRAIN_KEY.to_owned(), json!(turned.into_iter().collect::<Vec<_>>()));
+    }
+    // The hole list names each hole's board: a renamed board keeps its holes.
+    if let Some(holes) = meta.get_mut("bores").and_then(|bores| bores.get_mut("holes")).and_then(serde_json::Value::as_array_mut) {
+        for hole in holes {
+            if let Some(new) = hole.get("board").and_then(serde_json::Value::as_str).and_then(new_of) {
+                hole["board"] = json!(new);
+            }
+        }
     }
     meta
 }
@@ -1835,7 +1850,17 @@ fn hardware_panel(app: &mut SolveApp, ui: &egui::Ui, area: Rect, x: f32) -> f32 
         app.set_status(outcome.message(), false);
     }
     crate::scenario::publish_target("ledger:camlocks", rect);
-    group_caption(ui, area, x, width, "Camlocks");
+    // The bores themselves, cut into the boards: what the shop floor's machine will drill.
+    let holes_label = "Calc Holes";
+    let holes_width = button_width_at(ui, holes_label, 90.0) + 2.0 * INSET;
+    let holes_rect = Rect::from_min_size(pos2(x + width, top + 2.0), vec2(holes_width - 2.0 * INSET, BUTTON_HEIGHT));
+    if ribbon_button_icon(ui, "holes", holes_rect, holes_label, false, false, Some("hole")).clicked() {
+        let outcome = crate::ledger_cams::holes(app);
+        app.set_status(outcome.message(), false);
+    }
+    crate::scenario::publish_target("ledger:holes", holes_rect);
+    let width = width + holes_width;
+    group_caption(ui, area, x, width, "Camlocks & holes");
     x += width + PANEL_GAP;
     x
 }
@@ -1956,6 +1981,10 @@ mod tests {
         assert_eq!(moved["boards"]["side"]["material"], "Asian Night");
         assert_eq!(moved["boards"]["side (2)"]["material"], "Classic White");
         assert_eq!(moved["grain_across"], serde_json::json!(["panel - front", "side (2)"]));
+        let records = serde_json::json!({"bores": {"holes": [{"board": "Part (10)", "x": 1.0}, {"board": "top", "x": 2.0}]}});
+        let moved = renamed_records(records.as_object().cloned().unwrap(), &renamed);
+        assert_eq!(moved["bores"]["holes"][0]["board"], "side");
+        assert_eq!(moved["bores"]["holes"][1]["board"], "top");
         let turned = turned_in(meta.as_object().expect("an object"));
         assert!(turned.contains("Part (9)") && turned.contains("Part (10)") && turned.len() == 2);
         assert!(turned_in(&serde_json::Map::new()).is_empty());

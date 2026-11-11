@@ -218,6 +218,132 @@ pub fn calc(app: &mut crate::SolveApp) -> Outcome {
     // The folders go whether or not bodies were left behind: a pass whose markers were deleted by hand, or undone,
     // leaves its `Hardware` standing, and a second one beside it is exactly the stacking this pass must never make.
     clear_folders(app);
+    let (panels, run, standard, rule) = match engine(app) {
+        Ok(found) => found,
+        Err(panels) => return Outcome { panels, ..Outcome::default() },
+    };
+    let mut drawn = 0usize;
+    /// A carcass has tens of bores. Hundreds means the pairing is wrong, and drawing them would bury the design.
+    const MOST_MARKERS: usize = 600;
+
+    // **One marker per station, at the joint.** The engine says which fastener each bore belongs to
+    // (`Hole::station`), so the list is grouped by that id rather than by proximity: the bolt and its ⌀10 mate are the
+    // same world point, and one cam is three bores. Within a station the block goes on the bore that *is* the joint —
+    // `ledger_holes::station_anchor` prefers the mate's pre-hole, i.e. the point where the two boards meet. That is
+    // what makes a board which only receives mates (the tabletop: 22 pre-holes and 6 dowel mates, no cup at all)
+    // carry a mark, and it puts the cup board's mark on the same point instead of 33 mm in from the seam; a corner
+    // no longer collects a pile of blocks either.
+    let mut stations: Vec<Station> = Vec::new();
+    let mut bores: Vec<Vec<&Hole>> = Vec::new();
+    for hole in &run.holes {
+        if !panels.iter().any(|panel| panel.id == hole.part_id) {
+            continue;
+        }
+        match stations.iter().position(|station| station.id == hole.station) {
+            Some(index) => bores[index].push(hole),
+            None => {
+                stations.push(Station { id: hole.station, fastener: hole.kind.fastener(), at: [0.0; 3] });
+                bores.push(vec![hole]);
+            }
+        }
+    }
+    let placed: Vec<Vec<crate::ledger_fittings::Bore>> = bores
+        .iter()
+        .map(|group| {
+            group
+                .iter()
+                .filter_map(|hole| panels.iter().find(|panel| panel.id == hole.part_id).map(|panel| crate::ledger_fittings::bore(panel, hole)))
+                .collect()
+        })
+        .collect();
+    for (station, group) in stations.iter_mut().zip(&bores) {
+        let Some(anchor) = station_anchor(group.iter().copied()) else {
+            continue;
+        };
+        let Some(panel) = panels.iter().find(|panel| panel.id == anchor.part_id) else {
+            continue;
+        };
+        station.at = hole_at_world(panel, anchor);
+        station.fastener = anchor.kind.fastener();
+    }
+
+    let mut filed: std::collections::BTreeMap<&'static str, Vec<String>> = std::collections::BTreeMap::new();
+    let mut numbers: std::collections::BTreeMap<&'static str, usize> = std::collections::BTreeMap::new();
+    let mut coloured: std::collections::BTreeMap<&'static str, Vec<String>> = std::collections::BTreeMap::new();
+    for (station, group) in stations.iter().zip(&placed) {
+        if drawn >= MOST_MARKERS {
+            break;
+        }
+        let (folder, word) = family(station.fastener);
+        let number = numbers.entry(word).or_insert(0);
+        *number += 1;
+        let name = format!("{word} {number}");
+        // The fitting as it is fitted - a housing turned to its bolt, a dowel across the seam - from the station's own
+        // bores; the plain block only where the engine left the station without the bore the drawing is placed from.
+        let refs: Vec<&crate::ledger_fittings::Bore> = group.iter().collect();
+        let created: Vec<String> = match crate::ledger_fittings::fitting_steps(station.fastener, &refs) {
+            Some(steps) => match crate::ledger_fittings::draw(app, &name, steps) {
+                Some(body) => vec![body],
+                None => continue,
+            },
+            None => {
+                let made = app.session.execute(
+                    "solid.box",
+                    &json!({
+                        "length": MARKER,
+                        "width": MARKER,
+                        "height": MARKER_DEEP,
+                        "center": station.at,
+                        "name": name,
+                        "body_name": name,
+                    }),
+                );
+                // Only what the kernel actually made is filed: a refused box must not leave a name in a folder, and a
+                // name the kernel had to change must be filed under the name the tree now shows.
+                let Ok(made) = made else { continue };
+                made.get("created_bodies")
+                    .and_then(Value::as_array)
+                    .map(|list| list.iter().filter_map(Value::as_str).map(str::to_owned).collect())
+                    .unwrap_or_else(|| vec![name])
+            }
+        };
+        if created.is_empty() {
+            continue;
+        }
+        coloured.entry(crate::ledger_fittings::colour(station.fastener)).or_default().extend(created.iter().cloned());
+        filed.entry(folder).or_default().extend(created);
+        drawn += 1;
+    }
+    for (colour, bodies) in &coloured {
+        let _ = app.session.execute("appearance.assign", &json!({ "bodies": bodies, "color": colour }));
+    }
+    file_under_hardware(app, &filed);
+    let count = |fastener: Fastener| stations.iter().filter(|station| station.fastener == fastener).count();
+    Outcome {
+        holes: run.holes.len(),
+        stations: stations.len(),
+        drawn,
+        cams: count(Fastener::Cam),
+        dowels: count(Fastener::Dowel),
+        pins: count(Fastener::ShelfPin),
+        panels: panels.len(),
+        retried: run.retried,
+        dropped: run.dropped,
+        unbanded: run.unbanded,
+        unported: run.unported,
+        unparsed: run.unparsed,
+        standard,
+        rule,
+    }
+}
+
+/// The engine's run over the bodies in the drawing - the selected ones, or all of them - leaving out what this tab
+/// drew itself. `Err` carries how many panels there were when fewer than two (nothing can be joined).
+fn engine(app: &mut crate::SolveApp) -> Result<(Vec<Panel>, Plan, Option<&'static str>, String), usize> {
+    let Ok(measured) = app.session.execute("inspect.measure", &json!({})) else {
+        return Err(0);
+    };
+    let bodies = boxes(&measured);
     // A selection narrows the pass to those bodies, which is what a person who picked two panels meant. Nothing selected
     // is every body in the drawing.
     let selected: BTreeSet<String> = app
@@ -250,99 +376,45 @@ pub fn calc(app: &mut crate::SolveApp) -> Outcome {
     let mut translation = translate_boards(&boards);
     let mut panels = std::mem::take(&mut translation.panels);
     if panels.len() < 2 {
-        return Outcome { panels: panels.len(), ..Outcome::default() };
+        return Err(panels.len());
     }
     let construction = current.as_ref().and_then(|current| current.construction);
     let (run, standard, rule) = drill(&mut panels, &translation.roles, construction);
-    let mut drawn = 0usize;
-    /// A carcass has tens of bores. Hundreds means the pairing is wrong, and drawing them would bury the design.
-    const MOST_MARKERS: usize = 600;
+    Ok((panels, run, standard, rule))
+}
 
-    // **One marker per station, at the joint.** The engine says which fastener each bore belongs to
-    // (`Hole::station`), so the list is grouped by that id rather than by proximity: the bolt and its ⌀10 mate are the
-    // same world point, and one cam is three bores. Within a station the block goes on the bore that *is* the joint —
-    // `ledger_holes::station_anchor` prefers the mate's pre-hole, i.e. the point where the two boards meet. That is
-    // what makes a board which only receives mates (the tabletop: 22 pre-holes and 6 dowel mates, no cup at all)
-    // carry a mark, and it puts the cup board's mark on the same point instead of 33 mm in from the seam; a corner
-    // no longer collects a pile of blocks either.
-    let mut stations: Vec<Station> = Vec::new();
-    let mut bores: Vec<Vec<&Hole>> = Vec::new();
-    for hole in &run.holes {
-        if !panels.iter().any(|panel| panel.id == hole.part_id) {
-            continue;
+/// Calc Holes: cut every bore the engine drills into its board, replacing what an earlier press cut, and keep the list.
+pub fn holes(app: &mut crate::SolveApp) -> crate::ledger_fittings::HolesOutcome {
+    let replaced = crate::ledger_fittings::clear_bores(app);
+    let (panels, run, _, _) = match engine(app) {
+        Ok(found) => found,
+        Err(panels) => {
+            return crate::ledger_fittings::HolesOutcome {
+                nothing: Some(if panels == 0 {
+                    "no boards to drill".to_owned()
+                } else {
+                    "no boards to drill - holes join two boards, and only one is here".to_owned()
+                }),
+                replaced,
+                ..Default::default()
+            };
         }
-        match stations.iter().position(|station| station.id == hole.station) {
-            Some(index) => bores[index].push(hole),
-            None => {
-                stations.push(Station { id: hole.station, fastener: hole.kind.fastener(), at: [0.0; 3] });
-                bores.push(vec![hole]);
-            }
-        }
-    }
-    for (station, group) in stations.iter_mut().zip(&bores) {
-        let Some(anchor) = station_anchor(group.iter().copied()) else {
-            continue;
+    };
+    let bores: Vec<crate::ledger_fittings::Bore> = run
+        .holes
+        .iter()
+        .filter_map(|hole| panels.iter().find(|panel| panel.id == hole.part_id).map(|panel| crate::ledger_fittings::bore(panel, hole)))
+        .collect();
+    if bores.is_empty() {
+        return crate::ledger_fittings::HolesOutcome {
+            nothing: Some(format!("{} boards, no bore fitted on them", panels.len())),
+            replaced,
+            ..Default::default()
         };
-        let Some(panel) = panels.iter().find(|panel| panel.id == anchor.part_id) else {
-            continue;
-        };
-        station.at = hole_at_world(panel, anchor);
-        station.fastener = anchor.kind.fastener();
     }
-
-    let mut filed: std::collections::BTreeMap<&'static str, Vec<String>> = std::collections::BTreeMap::new();
-    let mut numbers: std::collections::BTreeMap<&'static str, usize> = std::collections::BTreeMap::new();
-    for station in &stations {
-        if drawn >= MOST_MARKERS {
-            break;
-        }
-        let (folder, word) = family(station.fastener);
-        let number = numbers.entry(word).or_insert(0);
-        *number += 1;
-        let name = format!("{word} {number}");
-        let made = app.session.execute(
-            "solid.box",
-            &json!({
-                "length": MARKER,
-                "width": MARKER,
-                "height": MARKER_DEEP,
-                "center": station.at,
-                "name": name,
-                "body_name": name,
-            }),
-        );
-        // Only what the kernel actually made is filed: a refused box must not leave a name in a folder, and a name the
-        // kernel had to change must be filed under the name the tree now shows, or the folder points at nothing.
-        let Ok(made) = made else { continue };
-        let created: Vec<String> = made
-            .get("created_bodies")
-            .and_then(Value::as_array)
-            .map(|list| list.iter().filter_map(Value::as_str).map(str::to_owned).collect())
-            .unwrap_or_else(|| vec![name]);
-        if created.is_empty() {
-            continue;
-        }
-        filed.entry(folder).or_default().extend(created);
-        drawn += 1;
-    }
-    file_under_hardware(app, &filed);
-    let count = |fastener: Fastener| stations.iter().filter(|station| station.fastener == fastener).count();
-    Outcome {
-        holes: run.holes.len(),
-        stations: stations.len(),
-        drawn,
-        cams: count(Fastener::Cam),
-        dowels: count(Fastener::Dowel),
-        pins: count(Fastener::ShelfPin),
-        panels: panels.len(),
-        retried: run.retried,
-        dropped: run.dropped,
-        unbanded: run.unbanded,
-        unported: run.unported,
-        unparsed: run.unparsed,
-        standard,
-        rule,
-    }
+    let mut outcome = crate::ledger_fittings::cut(app, &bores);
+    outcome.replaced = replaced;
+    outcome
 }
 
 /// The engine's run over the drawing, with the item's **construction** choosing the rule set.
