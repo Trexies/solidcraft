@@ -161,17 +161,22 @@ pub fn merge(app: &mut crate::SolveApp) -> Report {
         // question - what is the nearest thing bigger than me. Every earlier rule here assumed the band touched its panel, and
         // seven bands on one table proved that assumption wrong.
         if let Some(partner) = twin {
-            let joined = app
-                .session
-                .execute(
-                    "solid.combine",
-                    &json!({
-                        "target": bodies[partner].name,
-                        "tools": [band.name],
-                        "operation": "join",
-                    }),
-                )
-                .is_ok();
+            // A ring round the panel is rebuilt as the closed band it stands for and joined in, so the board comes out as one
+            // body with one outline. Only a ring that does not wrap its panel falls back to joining what was drawn.
+            let joined = match cap_ring(app, band, &bodies[partner]) {
+                Some(done) => done,
+                None => app
+                    .session
+                    .execute(
+                        "solid.combine",
+                        &json!({
+                            "target": bodies[partner].name,
+                            "tools": [band.name],
+                            "operation": "join",
+                        }),
+                    )
+                    .is_ok(),
+            };
             if joined {
                 merged += 1;
                 gone[index] = true;
@@ -261,10 +266,10 @@ pub fn merge(app: &mut crate::SolveApp) -> Report {
             left += 1;
         }
     }
-    // The union leaves the seam where each strip's faces meet the panel's on one plane: coplanar
-    // in fact, but split. Healing dissolves those faces into one and joins the edges between
-    // them, so the panel draws as the one board it is. A band drawn proud of the face is a real
-    // step and stays one - the kernel only merges what lies on one plane.
+    // A ring was capped before its join (see `cap_ring`), so its board already has one outline. What is left for the heal is the
+    // seam a strip or profile leaves where its faces meet the panel's on one plane: coplanar in fact, but split. Healing dissolves
+    // those faces into one and joins the edges between them. A band drawn proud of the face is a real step and stays one - the
+    // kernel only merges what lies on one plane.
     for name in &panels {
         let Ok(reply) = app.session.execute("solid.heal", &json!({ "body": name })) else {
             continue;
@@ -285,4 +290,122 @@ pub fn merge(app: &mut crate::SolveApp) -> Report {
 fn is_shell(band: &Box3) -> bool {
     let box_volume = band.box_volume();
     box_volume > 0.0 && band.material() < box_volume * 0.7
+}
+
+/// The box a ring of edgebanding really fills, when it wraps its panel: the ring's outline across the panel's face, and the
+/// panel's own thickness through it. `None` when the ring does not go round the panel.
+///
+/// The shop's DWGs draw a banded board as a core inset by the band's thickness, plus a picture-frame ring of four side faces
+/// with no top or bottom. Joined as drawn, that ring leaves zero-area faces and the core's inset outline on the board - the line
+/// that stays visible in the edges view - because there is nothing on the top and bottom to merge.
+fn ring_cap(band: &Box3, panel: &Box3) -> Option<([f64; 3], [f64; 3])> {
+    let (rs, ps) = (band.size(), panel.size());
+    // Through the board the ring and the core are the same thickness; that is the axis that differs least.
+    let thick = (0..3).min_by(|a, b| (rs[*a] - ps[*a]).abs().total_cmp(&(rs[*b] - ps[*b]).abs()))?;
+    let shared = band.hi[thick].min(panel.hi[thick]) - band.lo[thick].max(panel.lo[thick]);
+    if shared <= ps[thick] * 0.5 {
+        return None;
+    }
+    // Across the face the ring reaches round the core on every side.
+    const HAIR: f64 = 0.01;
+    for axis in (0..3).filter(|a| *a != thick) {
+        if band.lo[axis] > panel.lo[axis] + HAIR || band.hi[axis] < panel.hi[axis] - HAIR {
+            return None;
+        }
+    }
+    let (mut lo, mut hi) = (band.lo, band.hi);
+    lo[thick] = panel.lo[thick];
+    hi[thick] = panel.hi[thick];
+    Some((lo, hi))
+}
+
+/// Replace a ring of edgebanding with the closed band it stands for, and join that into the panel: a box on the ring's outline
+/// with the panel's box cut out of it. Its faces lie exactly on the panel's, so the join leaves one board with one outline, and
+/// a hole or groove in the panel is kept because the cap never covers the panel itself.
+///
+/// `None` when the ring does not wrap the panel (the caller joins it as drawn). `Some(false)` when the editor refused a step; the
+/// design is then left as it was, the drawn ring included.
+fn cap_ring(app: &mut crate::SolveApp, band: &Box3, panel: &Box3) -> Option<bool> {
+    let (lo, hi) = ring_cap(band, panel)?;
+    let cap = format!("{} cap", band.name);
+    let opening = format!("{} opening", band.name);
+    let block = |name: &str, lo: [f64; 3], hi: [f64; 3]| {
+        json!({
+            "length": hi[0] - lo[0],
+            "width": hi[1] - lo[1],
+            "height": hi[2] - lo[2],
+            "corner": lo,
+            "body_name": name,
+        })
+    };
+    let steps = [
+        ("solid.box", block(&cap, lo, hi)),
+        ("solid.box", block(&opening, panel.lo, panel.hi)),
+        ("solid.combine", json!({ "target": cap, "tools": [opening], "operation": "cut" })),
+        ("solid.combine", json!({ "target": panel.name, "tools": [cap], "operation": "join" })),
+        ("solid.remove", json!({ "bodies": [band.name] })),
+    ];
+    for (done, (command, params)) in steps.iter().enumerate() {
+        if app.session.execute(command, params).is_err() {
+            // Take back what this ring added, so a refusal never leaves a stray cap or opening in the design.
+            let made: Vec<&str> = match done {
+                0 => vec![],
+                1 => vec![&cap],
+                2 => vec![&cap, &opening],
+                3 => vec![&cap],
+                _ => vec![],
+            };
+            if !made.is_empty() {
+                let _ = app.session.execute("solid.remove", &json!({ "bodies": made }));
+            }
+            return Some(false);
+        }
+    }
+    Some(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn body(name: &str, lo: [f64; 3], hi: [f64; 3]) -> Box3 {
+        Box3 { name: name.into(), lo, hi, volume: 0.0 }
+    }
+
+    /// SOL-DKS-2448's top as the DWG draws it: a core inset 2 mm all round and a capless ring on the outline. The cap is the
+    /// ring's outline at the core's thickness - the whole 1200.15 x 600.07 x 25.4 top.
+    #[test]
+    fn a_ring_round_its_core_caps_to_the_whole_board() {
+        let ring = body("Part", [0.0, -600.07, 736.6], [1200.15, 0.0, 762.0]);
+        let core = body("Part (2)", [2.0, -598.07, 736.6], [1198.15, -2.0, 762.0]);
+        let (lo, hi) = ring_cap(&ring, &core).expect("the ring wraps its core");
+        assert_eq!((lo, hi), ([0.0, -600.07, 736.6], [1200.15, 0.0, 762.0]));
+    }
+
+    /// A leg's ring is drawn 0.1 mm thicker than its core on each side; the cap takes the core's thickness, so the board is not
+    /// left with a step where the ring stood proud.
+    #[test]
+    fn the_cap_is_as_thick_as_the_core() {
+        let ring = body("Part (11)", [1.5, -600.1, 7.0], [20.75, -0.02, 736.59]);
+        let core = body("Part (12)", [1.6, -598.1, 9.0], [20.65, -2.03, 734.59]);
+        let (lo, hi) = ring_cap(&ring, &core).expect("the ring wraps its core");
+        assert_eq!((lo[0], hi[0]), (1.6, 20.65));
+        assert_eq!((lo[1], hi[1], lo[2], hi[2]), (-600.1, -0.02, 7.0, 736.59));
+    }
+
+    /// The far leg's ring is the same size as this core but stands 1,177 mm away: not this core's ring.
+    #[test]
+    fn a_ring_beside_the_core_is_not_its_ring() {
+        let ring = body("Part (11)", [1.6, -600.1, 7.0], [20.65, -0.02, 736.59]);
+        let core = body("Part (10)", [1179.1, -598.1, 9.0], [1198.15, -2.03, 734.59]);
+        assert!(ring_cap(&ring, &core).is_none());
+    }
+
+    /// A ring that stops short of one side of the core does not wrap it, and is joined as drawn.
+    #[test]
+    fn a_ring_short_of_the_core_is_not_capped() {
+        let ring = body("Band", [3.0, -600.0, 0.0], [1200.0, 0.0, 25.4]);
+        let core = body("Core", [2.0, -598.0, 0.0], [1198.0, -2.0, 25.4]);
+        assert!(ring_cap(&ring, &core).is_none());
+    }
 }
