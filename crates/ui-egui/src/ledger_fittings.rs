@@ -25,11 +25,16 @@
 //!
 //! # Holes
 //!
-//! Calc Holes cuts every cam and dowel bore (and shelf pin) into its board with SolidCraft's own `solid.hole`, at the
-//! engine's diameter and depth, and records the list in the design (`shop.ledger.bores`) in each board's own frame -
-//! measured from the board's corner, with the face it is drilled from - which is what a machine file is written from.
-//! A second press replaces the holes it made before: they are features of their own (`ledger bore N`), deleted and
-//! drilled again, so a moved board is never left with the old holes.
+//! Calc Holes draws every cam and dowel bore (and shelf pin) as a dark cylinder of the bore's own diameter and depth,
+//! standing in the board from the face it is drilled from (`hole N`, filed under `Hardware › Holes`), and records the
+//! list in the design (`shop.ledger.bores`) in each board's own frame - measured from the board's corner, with the
+//! face it is drilled from - which is what a machine file is written from.
+//!
+//! The bores are **not** cut into the boards. Cutting them is the kernel's slowest operation: the SOL-DKS desk's 33
+//! bores took 23-25 s in the bare engine (17 s for the modesty alone, where the bolt bore runs into the housing) and
+//! 81 s in the editor, which cannot answer meanwhile - on the owner's own design it looked like a crash. A marker
+//! takes about 2 ms, leaves the boards whole for the audit, the edgebanding and the grain, and shows the same thing.
+//! An earlier build's cut holes (features `ledger bore N`) are deleted on the next press.
 
 use ledger_holes::{Face, Fastener, Hole, HoleKind, Panel, hole_at_world};
 use serde_json::{Value, json};
@@ -267,13 +272,16 @@ pub fn draw(app: &mut crate::SolveApp, name: &str, steps: Vec<Step>) -> Option<S
 /// What Calc Holes did.
 #[derive(Debug, Default, Clone)]
 pub struct HolesOutcome {
-    pub cut: usize,
+    pub drawn: usize,
     pub refused: usize,
     pub boards: usize,
-    pub replaced: usize,
+    /// Holes an earlier build cut into the boards, taken out again.
+    pub uncut: usize,
     pub by_size: Vec<(f64, f64, usize)>,
     /// The engine's own message when there was nothing to drill.
     pub nothing: Option<String>,
+    /// The names of the markers drawn, for the tree.
+    pub names: Vec<String>,
 }
 
 impl HolesOutcome {
@@ -284,30 +292,33 @@ impl HolesOutcome {
         let sizes: Vec<String> =
             self.by_size.iter().map(|(dia, depth, n)| format!("{n} at {dia} mm x {depth} deep")).collect();
         let mut line = format!(
-            "{} {} cut in {} {} ({})",
-            self.cut,
-            if self.cut == 1 { "hole" } else { "holes" },
+            "{} {} in {} {} ({})",
+            self.drawn,
+            if self.drawn == 1 { "hole" } else { "holes" },
             self.boards,
             if self.boards == 1 { "board" } else { "boards" },
             sizes.join(", ")
         );
-        if self.replaced > 0 {
-            line.push_str(&format!("; {} from the last run replaced", self.replaced));
+        if self.uncut > 0 {
+            line.push_str(&format!("; {} holes cut by an earlier build filled back in", self.uncut));
         }
         if self.refused > 0 {
-            line.push_str(&format!("; {} could not be cut", self.refused));
+            line.push_str(&format!("; {} could not be drawn", self.refused));
         }
         line.push_str("; hole list saved in the design for the machine file");
         line
     }
 }
 
-/// The hole features an earlier Calc Holes cut, by id.
+/// The name a hole marker is drawn under.
+pub const HOLE_MARKER: &str = "hole ";
+
+/// The hole features an earlier build's Calc Holes cut, by id.
 pub fn earlier_bores(app: &crate::SolveApp) -> Vec<u64> {
     app.session.doc.features.iter().filter(|feature| feature.name.starts_with(BORE_FEATURE)).map(|f| f.id).collect()
 }
 
-/// Delete the holes an earlier press cut, so the boards are whole again before they are drilled. Answers how many.
+/// Delete the holes an earlier build cut into the boards, so they are whole again. Answers how many.
 pub fn clear_bores(app: &mut crate::SolveApp) -> usize {
     let ids = earlier_bores(app);
     if ids.is_empty() {
@@ -320,30 +331,38 @@ pub fn clear_bores(app: &mut crate::SolveApp) -> usize {
     }
 }
 
-/// Cut every bore into its board, and say how it went. `bores` come from one engine run.
-pub fn cut(app: &mut crate::SolveApp, bores: &[Bore]) -> HolesOutcome {
+/// Draw every bore as a marker, and keep the list for the machine file. `bores` come from one engine run.
+pub fn mark(app: &mut crate::SolveApp, bores: &[Bore]) -> HolesOutcome {
     let mut outcome = HolesOutcome::default();
     let mut boards = std::collections::BTreeSet::new();
     let mut sizes: std::collections::BTreeMap<(i64, i64), usize> = std::collections::BTreeMap::new();
     let mut record: Vec<Value> = Vec::new();
     for (index, bore) in bores.iter().enumerate() {
-        let name = format!("{BORE_FEATURE}{}", index + 1);
-        let done = app.session.execute(
-            "solid.hole",
+        let name = format!("{HOLE_MARKER}{}", index + 1);
+        // A hair proud of the face, so the marker reads as the bore's mouth rather than vanishing into the board.
+        let made = app.session.execute(
+            "solid.cylinder",
             &json!({
-                "position": bore.mouth,
-                "direction": bore.dir,
+                "base": add(bore.mouth, scale(bore.dir, -0.3)),
+                "axis": bore.dir,
                 "diameter": bore.dia,
-                "depth": bore.depth,
-                "targets": [bore.board],
+                "height": bore.depth + 0.3,
                 "name": name,
+                "body_name": name,
             }),
         );
-        if done.is_err() {
+        let Ok(made) = made else {
             outcome.refused += 1;
             continue;
-        }
-        outcome.cut += 1;
+        };
+        let body = made
+            .get("created_bodies")
+            .and_then(Value::as_array)
+            .and_then(|list| list.first())
+            .and_then(Value::as_str)
+            .map_or_else(|| name.clone(), str::to_owned);
+        outcome.names.push(body);
+        outcome.drawn += 1;
         boards.insert(bore.board.clone());
         *sizes.entry(((bore.dia * 10.0).round() as i64, (bore.depth * 10.0).round() as i64)).or_default() += 1;
         record.push(json!({
@@ -361,6 +380,9 @@ pub fn cut(app: &mut crate::SolveApp, bores: &[Bore]) -> HolesOutcome {
             "mouth": [round1(bore.mouth[0]), round1(bore.mouth[1]), round1(bore.mouth[2])],
             "direction": bore.dir,
         }));
+    }
+    if !outcome.names.is_empty() {
+        let _ = app.session.execute("appearance.assign", &json!({ "bodies": outcome.names, "color": "#1E1E1E" }));
     }
     outcome.boards = boards.len();
     outcome.by_size = sizes.into_iter().map(|((dia, depth), n)| (dia as f64 / 10.0, depth as f64 / 10.0, n)).collect();

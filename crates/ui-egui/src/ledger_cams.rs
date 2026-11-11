@@ -86,17 +86,38 @@ impl Box3 {
     }
 }
 
-/// Whether a body name is one this pass writes: `cam 7`, `dowel 2`, `pin 1`.
-fn is_marker_name(name: &str) -> bool {
-    name.starts_with("cam ") || name.starts_with("dowel ") || name.starts_with("pin ")
+/// Whether a body name is one this tab writes: `cam 7`, `dowel 2`, `pin 1`, and Calc Holes' `hole 3`.
+pub(crate) fn is_marker_name(name: &str) -> bool {
+    name.starts_with("cam ")
+        || name.starts_with("dowel ")
+        || name.starts_with("pin ")
+        || name.starts_with(crate::ledger_fittings::HOLE_MARKER)
 }
+
+/// The folder each kind of marker is filed in, by its name.
+fn folder_of(name: &str) -> Option<&'static str> {
+    if name.starts_with("cam ") {
+        Some("Cams")
+    } else if name.starts_with("dowel ") {
+        Some("Dowels")
+    } else if name.starts_with("pin ") {
+        Some("Shelf pins")
+    } else if name.starts_with(crate::ledger_fittings::HOLE_MARKER) {
+        Some(HOLES)
+    } else {
+        None
+    }
+}
+
+/// The folder Calc Holes files its markers in.
+const HOLES: &str = "Holes";
 
 /// The folder a kind of fastener is filed in, and the word its markers are numbered from.
 fn family(fastener: Fastener) -> (&'static str, &'static str) {
     match fastener {
         Fastener::Cam => ("Cams", "cam"),
         Fastener::Dowel => ("Dowels", "dowel"),
-        Fastener::ShelfPin => ("Holes", "pin"),
+        Fastener::ShelfPin => ("Shelf pins", "pin"),
     }
 }
 
@@ -317,7 +338,8 @@ pub fn calc(app: &mut crate::SolveApp) -> Outcome {
     for (colour, bodies) in &coloured {
         let _ = app.session.execute("appearance.assign", &json!({ "bodies": bodies, "color": colour }));
     }
-    file_under_hardware(app, &filed);
+    let _ = filed;
+    refile(app);
     let count = |fastener: Fastener| stations.iter().filter(|station| station.fastener == fastener).count();
     Outcome {
         holes: run.holes.len(),
@@ -383,19 +405,30 @@ fn engine(app: &mut crate::SolveApp) -> Result<(Vec<Panel>, Plan, Option<&'stati
     Ok((panels, run, standard, rule))
 }
 
-/// Calc Holes: cut every bore the engine drills into its board, replacing what an earlier press cut, and keep the list.
+/// Calc Holes: draw every bore the engine drills as a marker, replacing an earlier press's, and keep the list.
 pub fn holes(app: &mut crate::SolveApp) -> crate::ledger_fittings::HolesOutcome {
-    let replaced = crate::ledger_fittings::clear_bores(app);
+    let uncut = crate::ledger_fittings::clear_bores(app);
+    if let Ok(measured) = app.session.execute("inspect.measure", &json!({})) {
+        let earlier: Vec<String> = boxes(&measured)
+            .into_iter()
+            .map(|body| body.name)
+            .filter(|name| name.starts_with(crate::ledger_fittings::HOLE_MARKER))
+            .collect();
+        if !earlier.is_empty() {
+            let _ = app.session.execute("solid.remove", &json!({ "bodies": earlier }));
+        }
+    }
     let (panels, run, _, _) = match engine(app) {
         Ok(found) => found,
         Err(panels) => {
+            refile(app);
             return crate::ledger_fittings::HolesOutcome {
                 nothing: Some(if panels == 0 {
                     "no boards to drill".to_owned()
                 } else {
                     "no boards to drill - holes join two boards, and only one is here".to_owned()
                 }),
-                replaced,
+                uncut,
                 ..Default::default()
             };
         }
@@ -406,15 +439,33 @@ pub fn holes(app: &mut crate::SolveApp) -> crate::ledger_fittings::HolesOutcome 
         .filter_map(|hole| panels.iter().find(|panel| panel.id == hole.part_id).map(|panel| crate::ledger_fittings::bore(panel, hole)))
         .collect();
     if bores.is_empty() {
+        refile(app);
         return crate::ledger_fittings::HolesOutcome {
             nothing: Some(format!("{} boards, no bore fitted on them", panels.len())),
-            replaced,
+            uncut,
             ..Default::default()
         };
     }
-    let mut outcome = crate::ledger_fittings::cut(app, &bores);
-    outcome.replaced = replaced;
+    let mut outcome = crate::ledger_fittings::mark(app, &bores);
+    outcome.uncut = uncut;
+    refile(app);
     outcome
+}
+
+/// File every marker in the design under `Hardware`, one folder per kind - the fittings Calc Camlocks drew and the
+/// holes Calc Holes drew together, so neither button's press unfiles the other's.
+fn refile(app: &mut crate::SolveApp) {
+    clear_folders(app);
+    let Ok(measured) = app.session.execute("inspect.measure", &json!({})) else {
+        return;
+    };
+    let mut filed: BTreeMap<&'static str, Vec<String>> = BTreeMap::new();
+    for body in boxes(&measured) {
+        if let Some(folder) = folder_of(&body.name) {
+            filed.entry(folder).or_default().push(body.name);
+        }
+    }
+    file_under_hardware(app, &filed);
 }
 
 /// The engine's run over the drawing, with the item's **construction** choosing the rule set.
@@ -488,7 +539,9 @@ fn current() -> Option<Current> {
 /// Whether a browser group is one this pass owns: `Hardware` itself, or a kind folder inside it, **and** holding
 /// nothing but this pass's own markers. A folder the operator made and named `Cams` is theirs, and is left alone.
 fn is_hardware_folder(group: &solidcraft_engine::doc::BrowserGroup) -> bool {
-    let named = group.name == HARDWARE || [Fastener::Cam, Fastener::Dowel, Fastener::ShelfPin].iter().any(|f| family(*f).0 == group.name);
+    let named = group.name == HARDWARE
+        || [Fastener::Cam, Fastener::Dowel, Fastener::ShelfPin].iter().any(|f| family(*f).0 == group.name)
+        || group.name == HOLES;
     named && group.items.iter().all(|item| is_marker_name(item))
 }
 

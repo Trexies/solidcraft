@@ -172,7 +172,7 @@ pub fn name_parts(app: &mut crate::SolveApp) -> (usize, usize) {
     let whole = [hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]];
     // Calc Camlocks' markers keep their own names (`cam 3`, `dowel 1`, `pin 2`): it finds them again by those, and a marker
     // in a bottom panel is a small block near the floor that would otherwise pass for a foot.
-    let marker = |name: &str| name.starts_with("cam ") || name.starts_with("dowel ") || name.starts_with("pin ");
+    let marker = crate::ledger_cams::is_marker_name;
     let mut wanted: Vec<String> = bodies
         .iter()
         .map(|body| {
