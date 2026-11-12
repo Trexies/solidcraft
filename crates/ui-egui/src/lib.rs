@@ -110,6 +110,7 @@ pub mod ledger_fittings;
 #[allow(dead_code)]
 pub(crate) mod ledger_joints;
 pub mod ledger_naming;
+pub mod ledger_resize;
 mod length_input;
 mod linked_source;
 #[cfg(test)]

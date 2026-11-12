@@ -1506,13 +1506,144 @@ fn skin_dropdown(app: &mut SolveApp, ui: &mut egui::Ui, rect: Rect, groups: &[(O
             }
         });
     if let Some(board) = skin {
-        let chosen = selected_bodies(app);
+        // A picked face or edge means its body: that is what a person clicking a board's side meant.
+        let chosen = crate::ledger_resize::selected(app);
         if chosen.is_empty() {
             app.set_status("skin: select bodies in the model first", true);
         } else {
-            skin_bodies(app, &board, &chosen);
+            skin_or_resize(app, &board, chosen);
         }
     }
+}
+
+/// A skin in the board's own thickness just skins. One in another thickness opens the resize preview first: the board
+/// is thinned or thickened on its inside and the boards against it follow, once the operator has seen what will move.
+fn skin_or_resize(app: &mut SolveApp, board: &Board, chosen: Vec<String>) {
+    let boxes = crate::ledger_resize::boxes(app);
+    let off: Vec<String> = chosen
+        .iter()
+        .filter(|name| {
+            boxes.iter().find(|b| &b.name == *name).is_some_and(|b| {
+                let mut size = [b.hi[0] - b.lo[0], b.hi[1] - b.lo[1], b.hi[2] - b.lo[2]];
+                size.sort_by(f64::total_cmp);
+                (size[0] - board.thickness).abs() > SLACK_MM
+            })
+        })
+        .cloned()
+        .collect();
+    if off.is_empty() {
+        skin_bodies(app, board, &chosen);
+        return;
+    }
+    let plan = crate::ledger_resize::plan_all(&boxes, &off, board.thickness);
+    // What will move is selected while the preview is up, so the model shows it as well as the list does.
+    if let Ok(plan) = &plan {
+        let mut lit: Vec<String> = Vec::new();
+        for step in &plan.steps {
+            let (crate::ledger_resize::Step::Offset { body, .. } | crate::ledger_resize::Step::Shift { body, .. }) = step;
+            if !lit.contains(body) {
+                lit.push(body.clone());
+            }
+        }
+        app.session.selection = lit.into_iter().map(|name| solidcraft_engine::Sel::Body { name }).collect();
+    }
+    *PENDING_RESIZE.lock().unwrap_or_else(|e| e.into_inner()) = Some(PendingResize { board: board.clone(), bodies: chosen, plan });
+}
+
+/// A resize waiting for the operator's answer.
+struct PendingResize {
+    board: Board,
+    bodies: Vec<String>,
+    plan: Result<crate::ledger_resize::Plan, String>,
+}
+
+static PENDING_RESIZE: std::sync::Mutex<Option<PendingResize>> = std::sync::Mutex::new(None);
+
+/// The resize preview: what will move, and Resize / Skin only / Cancel.
+fn resize_window(app: &mut SolveApp, ctx: &egui::Context) {
+    let t = Tokens::get();
+    let mut guard = PENDING_RESIZE.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(pending) = guard.as_ref() else { return };
+    let title = format!("Change to {} {}", sheet_class_label(pending.board.thickness), pending.board.material);
+    let ok = if pending.plan.is_ok() { "Resize and skin" } else { "" };
+    let (closed, action) = crate::ui_kit::Window::new(egui::Id::new("sc_ledger_resize"), "render_paint", &title)
+        .actions(ok, "Cancel", Some("Skin only"))
+        .show(ctx, pending.plan.is_ok(), |ui| match &pending.plan {
+            Ok(plan) => {
+                ui.label(egui::RichText::new("Nothing has moved yet. This will:").color(t.text_dim));
+                for line in &plan.lines {
+                    ui.add(egui::Label::new(egui::RichText::new(format!("•  {line}")).color(t.text)).wrap());
+                }
+                ui.label(
+                    egui::RichText::new("Run Calc Camlocks and Calc Holes again afterwards: the joints have moved.")
+                        .small()
+                        .color(t.text_dim),
+                );
+            }
+            Err(why) => {
+                ui.label(egui::RichText::new(why).color(t.error));
+            }
+        });
+    let answer = match action {
+        crate::ui_kit::Action::Ok => Some(true),
+        crate::ui_kit::Action::Apply => Some(false),
+        crate::ui_kit::Action::Cancel => None,
+        _ if closed => None,
+        _ => return,
+    };
+    let pending = guard.take().expect("checked above");
+    drop(guard);
+    app.session.selection.clear();
+    match answer {
+        Some(true) => {
+            let Ok(plan) = &pending.plan else { return };
+            match crate::ledger_resize::apply(app, plan) {
+                Ok(()) => {
+                    for body in &pending.bodies {
+                        retag_thickness(app, body, &pending.board);
+                    }
+                    skin_bodies(app, &pending.board, &pending.bodies);
+                    let moved = plan.steps.len().saturating_sub(pending.bodies.len());
+                    app.set_status(
+                        format!(
+                            "{} resized to {} and skinned {}; {moved} {} adjusted to meet {} - run Calc Camlocks again",
+                            pending.bodies.join(", "),
+                            sheet_class_label(pending.board.thickness),
+                            pending.board.material,
+                            if moved == 1 { "board" } else { "boards" },
+                            if pending.bodies.len() == 1 { "it" } else { "them" }
+                        ),
+                        false,
+                    );
+                }
+                Err(why) => app.set_status(why, true),
+            }
+        }
+        Some(false) => skin_bodies(app, &pending.board, &pending.bodies),
+        None => app.set_status("thickness not changed", false),
+    }
+}
+
+/// "1/2\"" for 12.7, else the millimetres.
+fn sheet_class_label(mm: f64) -> String {
+    for (inches, label) in [(12.7, "1/2\""), (19.05, "3/4\""), (25.4, "1\""), (28.575, "1-1/8\"")] {
+        if (mm - inches).abs() <= 0.25 {
+            return label.to_owned();
+        }
+    }
+    format!("{mm:.1} mm")
+}
+
+/// A resized board's stock record follows its new thickness, or the guard would take the resize back as a stretch.
+fn retag_thickness(app: &mut SolveApp, name: &str, board: &Board) {
+    let mut meta = ledger_meta(app);
+    let Some(tag) = meta.get_mut("boards").and_then(|boards| boards.get_mut(name)).and_then(serde_json::Value::as_object_mut) else {
+        return;
+    };
+    tag.insert("thickness".to_owned(), json!(board.thickness));
+    tag.insert("class".to_owned(), json!(solidcraft_class(board)));
+    tag.insert("material".to_owned(), json!(board.material));
+    let _ = app.run("document.metadata.set", json!({ "values": { KEY: meta } }));
 }
 
 /// The panel form, in a card of its own: a width and a height on the board that was chosen, its sheet as the default.
@@ -1725,6 +1856,7 @@ pub fn ribbon(app: &mut SolveApp, ui: &mut egui::Ui, area: Rect) {
     if let Some(board) = ui.ctx().data(|data| data.get_temp::<Board>(cut_board_id())) {
         cut_panel_window(app, ui.ctx(), &board);
     }
+    resize_window(app, ui.ctx());
 }
 
 /// The boards group: `Board ▾` adds a sheet or opens the panel form, and `snap` closes the gap a moved board leaves.
