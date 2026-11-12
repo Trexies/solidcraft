@@ -220,9 +220,20 @@ pub fn fitting_steps(fastener: Fastener, bores: &[&Bore]) -> Option<Vec<Step>> {
                     (mate.mouth, scale(mate.dir, -1.0))
                 }
             };
+            // The dowel the bores were drilled for, sitting across the seam in both: the desk's wooden ⌀8 x 10, 5 mm
+            // in each board; any other pair, the 8 x 40 with 10 mm in the mate as before.
+            let edge_depth = find(HoleKind::DowelEdge).map(|bore| bore.depth);
+            let mate_depth = find(HoleKind::DowelMateHole).map(|bore| bore.depth);
+            let (into_mate, length, dia) = match (edge_depth, mate_depth) {
+                (Some(edge), Some(mate)) => match ledger_holes::table_rules::DowelHardware::of_bores(edge, mate) {
+                    Some(dowel) if dowel.length < 40.0 => (dowel.mate_depth, dowel.length, dowel.dia),
+                    _ => (10.0, 40.0, 8.0),
+                },
+                _ => (10.0, 40.0, 8.0),
+            };
             Some(vec![Step {
                 command: "solid.cylinder",
-                params: json!({ "base": add(mouth, scale(dir, -10.0)), "axis": dir, "diameter": 8.0, "height": 40.0 }),
+                params: json!({ "base": add(mouth, scale(dir, -into_mate)), "axis": dir, "diameter": dia, "height": length }),
             }])
         }
         Fastener::ShelfPin => {
@@ -282,12 +293,34 @@ pub struct HolesOutcome {
     pub nothing: Option<String>,
     /// The names of the markers drawn, for the tree.
     pub names: Vec<String>,
+    /// Joints refused for a 1/2" board: while there are any, no machine list is saved.
+    pub too_thin: Vec<String>,
+    /// Fittings moved or flipped somewhere their holes cannot go (off the joint, through an edge, into another hole).
+    pub problems: Vec<String>,
 }
 
 impl HolesOutcome {
     pub fn message(&self) -> String {
         if let Some(why) = &self.nothing {
             return why.clone();
+        }
+        if !self.problems.is_empty() {
+            let fittings: std::collections::BTreeSet<&str> =
+                self.problems.iter().filter_map(|p| p.split(':').next()).collect();
+            return format!(
+                "{} {} to fix: {}. {} holes drawn, but NO hole list saved for the machine until {} fixed",
+                fittings.len(),
+                if fittings.len() == 1 { "fitting" } else { "fittings" },
+                self.problems.join("; "),
+                self.drawn,
+                if fittings.len() == 1 { "it is" } else { "they are" }
+            );
+        }
+        if let Some(warning) = crate::ledger_cams::thin_warning(&self.too_thin) {
+            return format!(
+                "{warning}. {} holes drawn, but NO hole list saved for the machine until those joints are fixed",
+                self.drawn
+            );
         }
         let sizes: Vec<String> =
             self.by_size.iter().map(|(dia, depth, n)| format!("{n} at {dia} mm x {depth} deep")).collect();
@@ -332,7 +365,7 @@ pub fn clear_bores(app: &mut crate::SolveApp) -> usize {
 }
 
 /// Draw every bore as a marker, and keep the list for the machine file. `bores` come from one engine run.
-pub fn mark(app: &mut crate::SolveApp, bores: &[Bore]) -> HolesOutcome {
+pub fn mark(app: &mut crate::SolveApp, bores: &[Bore], blocked: Option<String>) -> HolesOutcome {
     let mut outcome = HolesOutcome::default();
     let mut boards = std::collections::BTreeSet::new();
     let mut sizes: std::collections::BTreeMap<(i64, i64), usize> = std::collections::BTreeMap::new();
@@ -386,11 +419,13 @@ pub fn mark(app: &mut crate::SolveApp, bores: &[Bore]) -> HolesOutcome {
     }
     outcome.boards = boards.len();
     outcome.by_size = sizes.into_iter().map(|((dia, depth), n)| (dia as f64 / 10.0, depth as f64 / 10.0, n)).collect();
-    crate::ledger_boards::set_ledger_entry(
-        app,
-        "bores",
-        json!({ "format": "ledger-bores/1", "units": "mm", "holes": record }),
-    );
+    // A list missing joints must never reach the machine: an earlier, complete one is taken out too, so nothing stale
+    // is left looking valid.
+    let entry = match blocked {
+        None => json!({ "format": "ledger-bores/1", "units": "mm", "holes": record }),
+        Some(why) => json!({ "format": "ledger-bores/1", "units": "mm", "holes": [], "blocked": why }),
+    };
+    crate::ledger_boards::set_ledger_entry(app, "bores", entry);
     outcome
 }
 
@@ -510,6 +545,28 @@ mod tests {
         // The bolt stands in the side's edge bore and out into the top.
         let shank = &steps[3].params;
         assert_eq!(shank["axis"], json!([-0.0, -0.0, 1.0]));
+    }
+
+    #[test]
+    fn a_wooden_dowel_is_ten_long_and_half_in_each_board() {
+        let edge = Bore {
+            board: "side".into(),
+            kind: HoleKind::DowelEdge,
+            station: 1,
+            face: Face::Edge,
+            mouth: [0.0, 0.0, 0.0],
+            dir: [0.0, 0.0, -1.0],
+            dia: 8.0,
+            depth: 5.0,
+            local: [0.0; 3],
+            panel: [0.0; 3],
+        };
+        let mate = Bore { board: "top".into(), kind: HoleKind::DowelMateHole, face: Face::Front, dir: [0.0, 0.0, 1.0], ..edge.clone() };
+        let steps = fitting_steps(Fastener::Dowel, &[&edge, &mate]).unwrap();
+        let p = &steps[0].params;
+        assert_eq!(p["height"], 10.0);
+        assert_eq!(p["base"][2], 5.0, "5 mm out into the mate");
+        assert_eq!(p["diameter"], 8.0);
     }
 
     #[test]

@@ -81,7 +81,7 @@ fn design_boards(app: &mut SolveApp) -> serde_json::Map<String, serde_json::Valu
 ///
 /// `document.metadata.set` replaces the key's whole object, so every writer reads this, changes its own part and writes it
 /// all back - otherwise recording a board would wipe the grain, and turning the grain would wipe the boards.
-fn ledger_meta(app: &mut SolveApp) -> serde_json::Map<String, serde_json::Value> {
+pub(crate) fn ledger_meta(app: &mut SolveApp) -> serde_json::Map<String, serde_json::Value> {
     // Another tool's data comes back under `metadata`; `properties` holds only SolidCraft's own text fields (author,
     // description, part_number, …) and answers null for this key, which would leave the guard blind.
     app.session
@@ -613,7 +613,20 @@ fn listed_has(answer: &serde_json::Value, name: &str) -> bool {
 /// Whether the model is drawn in wireframe, so the fitting markers inside the panels stay in sight. The shop asked for this
 /// switch **here** rather than in Ledger: swapping between the shaded and the edge-only view is a thing done while working, not
 /// a preference of the host program.
-static WIREFRAME_ON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// The Ledger tab's **edges** view is on: boards are drawn as outlines and hardware stays solid in its colours. Only this
+/// button sets it; any other way out of wireframe ends it (the viewport clears it), so SolidCraft's own wireframe stays
+/// plain outlines.
+pub(crate) static WIREFRAME_ON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether the viewport should draw hardware solid in wireframe right now.
+pub(crate) fn solid_hardware(app: &SolveApp) -> bool {
+    if app.ui.visual_style != 2 {
+        // Left wireframe some other way: the next wireframe, from anywhere but this button, is the plain one.
+        WIREFRAME_ON.store(false, std::sync::atomic::Ordering::Relaxed);
+        return false;
+    }
+    WIREFRAME_ON.load(std::sync::atomic::Ordering::Relaxed)
+}
 
 /// Whether the grain arrows are drawn. A way of looking at the design, so it is the session's, not the design's.
 static GRAIN_ON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -1021,6 +1034,16 @@ pub fn snap_after_move(app: &mut SolveApp, command: &str, params: &serde_json::V
     }
     if SNAPPING.swap(true, Ordering::SeqCst) {
         return;
+    }
+    // Hardware moved with snap on slides along its joint: whatever the move did off the joint's line is taken back.
+    let moved_names: Vec<String> = params
+        .get("bodies")
+        .and_then(serde_json::Value::as_array)
+        .map(|list| list.iter().filter_map(serde_json::Value::as_str).map(str::to_owned).collect())
+        .unwrap_or_default();
+    let back = crate::ledger_hand::snap_moved(app, &moved_names);
+    if !back.is_empty() {
+        app.set_status(format!("snap: {} kept on {} joint", back.join(", "), if back.len() == 1 { "its" } else { "their" }), false);
     }
     let boards = design_boards(app);
     let moved: Vec<String> = params
@@ -1536,6 +1559,14 @@ fn skin_or_resize(app: &mut SolveApp, board: &Board, chosen: Vec<String>) {
         return;
     }
     let plan = crate::ledger_resize::plan_all(&boxes, &off, board.thickness);
+    let markers = crate::ledger_cams::has_markers(app);
+    // The resized design, run through the hole engine before anything moves: what the joints will get, and which get none.
+    let after = match &plan {
+        Ok(_) => crate::ledger_resize::after_all(&boxes, &off, board.thickness)
+            .map(|after| crate::ledger_cams::dry_run(app, &after))
+            .unwrap_or_default(),
+        Err(_) => (0, 0, Vec::new()),
+    };
     // What will move is selected while the preview is up, so the model shows it as well as the list does.
     if let Ok(plan) = &plan {
         let mut lit: Vec<String> = Vec::new();
@@ -1547,7 +1578,8 @@ fn skin_or_resize(app: &mut SolveApp, board: &Board, chosen: Vec<String>) {
         }
         app.session.selection = lit.into_iter().map(|name| solidcraft_engine::Sel::Body { name }).collect();
     }
-    *PENDING_RESIZE.lock().unwrap_or_else(|e| e.into_inner()) = Some(PendingResize { board: board.clone(), bodies: chosen, plan });
+    *PENDING_RESIZE.lock().unwrap_or_else(|e| e.into_inner()) =
+        Some(PendingResize { board: board.clone(), bodies: chosen, plan, markers, after, recalc: true });
 }
 
 /// A resize waiting for the operator's answer.
@@ -1555,6 +1587,12 @@ struct PendingResize {
     board: Board,
     bodies: Vec<String>,
     plan: Result<crate::ledger_resize::Plan, String>,
+    /// What the design already has that a resize leaves out of date: (cams/dowels, hole markers).
+    markers: (bool, bool),
+    /// What recalculating gives on the resized design: (cams, dowels, joints refused for a 1/2" board).
+    after: (usize, usize, Vec<String>),
+    /// Recalculate cams and holes after the resize (the operator can untick it).
+    recalc: bool,
 }
 
 static PENDING_RESIZE: std::sync::Mutex<Option<PendingResize>> = std::sync::Mutex::new(None);
@@ -1563,7 +1601,7 @@ static PENDING_RESIZE: std::sync::Mutex<Option<PendingResize>> = std::sync::Mute
 fn resize_window(app: &mut SolveApp, ctx: &egui::Context) {
     let t = Tokens::get();
     let mut guard = PENDING_RESIZE.lock().unwrap_or_else(|e| e.into_inner());
-    let Some(pending) = guard.as_ref() else { return };
+    let Some(pending) = guard.as_mut() else { return };
     let title = format!("Change to {} {}", sheet_class_label(pending.board.thickness), pending.board.material);
     let ok = if pending.plan.is_ok() { "Resize and skin" } else { "" };
     let (closed, action) = crate::ui_kit::Window::new(egui::Id::new("sc_ledger_resize"), "render_paint", &title)
@@ -1574,11 +1612,40 @@ fn resize_window(app: &mut SolveApp, ctx: &egui::Context) {
                 for line in &plan.lines {
                     ui.add(egui::Label::new(egui::RichText::new(format!("•  {line}")).color(t.text)).wrap());
                 }
-                ui.label(
-                    egui::RichText::new("Run Calc Camlocks and Calc Holes again afterwards: the joints have moved.")
-                        .small()
-                        .color(t.text_dim),
-                );
+                let (cams, dowels, thin) = &pending.after;
+                // The owner's rule: no hardware in 1/2" board. Said before the resize, in amber, joint by joint.
+                if !thin.is_empty() {
+                    ui.add_space(6.0);
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(format!(
+                                "⚠  No hardware can go in 1/2\" board. After this, {} {} will get no cams or dowels:",
+                                thin.len(),
+                                if thin.len() == 1 { "joint" } else { "joints" }
+                            ))
+                            .color(egui::Color32::from_rgb(0xE8, 0xA3, 0x3D)),
+                        )
+                        .wrap(),
+                    );
+                    for line in thin {
+                        ui.label(egui::RichText::new(format!("     {line}")).color(egui::Color32::from_rgb(0xE8, 0xA3, 0x3D)));
+                    }
+                }
+                if pending.markers.0 || pending.markers.1 {
+                    ui.add_space(6.0);
+                    let what = if pending.markers.1 { "cams, dowels and holes" } else { "cams and dowels" };
+                    ui.checkbox(
+                        &mut pending.recalc,
+                        format!("Recalculate {what} afterwards ({cams} cams, {dowels} dowels)"),
+                    );
+                    if !pending.recalc {
+                        ui.label(
+                            egui::RichText::new("The ones in the design now will be in the wrong places.")
+                                .small()
+                                .color(egui::Color32::from_rgb(0xE8, 0xA3, 0x3D)),
+                        );
+                    }
+                }
             }
             Err(why) => {
                 ui.label(egui::RichText::new(why).color(t.error));
@@ -1604,6 +1671,26 @@ fn resize_window(app: &mut SolveApp, ctx: &egui::Context) {
                     }
                     skin_bodies(app, &pending.board, &pending.bodies);
                     let moved = plan.steps.len().saturating_sub(pending.bodies.len());
+                    // The joints moved with the boards: their fittings and holes are drawn again where they now are.
+                    if pending.recalc && (pending.markers.0 || pending.markers.1) {
+                        let cams = crate::ledger_cams::calc(app);
+                        let message = if pending.markers.1 {
+                            crate::ledger_cams::holes(app).message()
+                        } else {
+                            cams.message()
+                        };
+                        let warn = cams.is_warning();
+                        app.set_status(
+                            format!(
+                                "{} resized to {}; {moved} {} adjusted. {message}",
+                                pending.bodies.join(", "),
+                                sheet_class_label(pending.board.thickness),
+                                if moved == 1 { "board" } else { "boards" }
+                            ),
+                            warn,
+                        );
+                        return;
+                    }
                     app.set_status(
                         format!(
                             "{} resized to {} and skinned {}; {moved} {} adjusted to meet {} - run Calc Camlocks again",
@@ -1731,15 +1818,16 @@ pub fn ribbon(app: &mut SolveApp, ui: &mut egui::Ui, area: Rect) {
     let grain_w = button_width(ui, "Grain");
     let width = wire_w + grain_w + BUTTON_GAP + 2.0 * INSET;
     let wire_rect = Rect::from_min_size(pos2(x + INSET, top + 2.0), vec2(wire_w, BUTTON_HEIGHT));
-    let mut wireframe = WIREFRAME_ON.load(std::sync::atomic::Ordering::Relaxed);
+    let mut wireframe = solid_hardware(app);
     if ribbon_button_icon(ui, "wireframe", wire_rect, "edges", false, wireframe, Some("style_wireframe")).clicked() {
         wireframe = !wireframe;
-        WIREFRAME_ON.store(wireframe, std::sync::atomic::Ordering::Relaxed);
         let style = if wireframe { "wireframe" } else { "shaded_with_edges" };
-        if app.run("view.visual_style", serde_json::json!({ "style": style })).is_ok() {
+        let done = app.run("view.visual_style", serde_json::json!({ "style": style })).is_ok();
+        WIREFRAME_ON.store(done && wireframe, std::sync::atomic::Ordering::Relaxed);
+        if done {
             app.set_status(
                 if wireframe {
-                    "wireframe: every edge shown, so the marked bores are in sight"
+                    "edges: boards as outlines, hardware solid, so every cam, dowel and hole is in sight"
                 } else {
                     "shaded: edges on the faces only"
                 },
@@ -1934,9 +2022,14 @@ fn hardware_panel(app: &mut SolveApp, ui: &egui::Ui, area: Rect, x: f32) -> f32 
     let width = button_width_at(ui, label, 110.0) + 2.0 * INSET;
     let rect = Rect::from_min_size(pos2(x + INSET, top + 2.0), vec2(width - 2.0 * INSET, BUTTON_HEIGHT));
     if ribbon_button_icon(ui, "camlocks", rect, label, false, false, Some("edge_continuity")).clicked() {
-        // The vendor's own hole engine, over the bodies in the drawing: one block per bore it would drill.
-        let outcome = crate::ledger_cams::calc(app);
-        app.set_status(outcome.message(), false);
+        // Hardware moved or flipped by hand is the operator's: ask before the rule puts it back.
+        let hand = crate::ledger_hand::hand_changed(app);
+        if hand.is_empty() {
+            let outcome = crate::ledger_cams::calc(app);
+            app.set_status(outcome.message(), outcome.is_warning());
+        } else {
+            *PENDING_KEEP.lock().unwrap_or_else(|e| e.into_inner()) = Some(hand);
+        }
     }
     crate::scenario::publish_target("ledger:camlocks", rect);
     // The bores themselves, cut into the boards: what the shop floor's machine will drill.
@@ -1945,13 +2038,110 @@ fn hardware_panel(app: &mut SolveApp, ui: &egui::Ui, area: Rect, x: f32) -> f32 
     let holes_rect = Rect::from_min_size(pos2(x + width, top + 2.0), vec2(holes_width - 2.0 * INSET, BUTTON_HEIGHT));
     if ribbon_button_icon(ui, "holes", holes_rect, holes_label, false, false, Some("hole")).clicked() {
         let outcome = crate::ledger_cams::holes(app);
-        app.set_status(outcome.message(), false);
+        app.set_status(outcome.message(), !outcome.too_thin.is_empty() || !outcome.problems.is_empty());
     }
     crate::scenario::publish_target("ledger:holes", holes_rect);
-    let width = width + holes_width;
+    let mut width = width + holes_width;
+    // Turn a cam over so it sits in the other face of its board; Calc Holes then drills it where it now is.
+    let flip_label = "Flip cam";
+    let flip_width = button_width_at(ui, flip_label, 84.0) + 2.0 * INSET;
+    let flip_rect = Rect::from_min_size(pos2(x + width, top + 2.0), vec2(flip_width - 2.0 * INSET, BUTTON_HEIGHT));
+    if ribbon_button_icon(ui, "flip_cam", flip_rect, flip_label, false, false, Some("mirror")).clicked() {
+        let chosen: Vec<String> =
+            crate::ledger_resize::selected(app).into_iter().filter(|name| name.starts_with("cam ")).collect();
+        if chosen.is_empty() {
+            app.set_status("flip cam: select the cams to flip in the model first", true);
+        } else {
+            let flipped = crate::ledger_hand::as_one_step(app, "Flip cam", |app| crate::ledger_hand::flip(app, &chosen));
+            let mut line = if flipped.done.is_empty() {
+                "nothing flipped".to_owned()
+            } else {
+                format!("flipped {} to the other face of {} board - press Calc Holes to drill for it", flipped.done.join(", "), if flipped.done.len() == 1 { "its" } else { "their" })
+            };
+            if !flipped.visible.is_empty() {
+                line.push_str(&format!("; check: {} now open on a face the finished piece shows", flipped.visible.join(", ")));
+            }
+            if !flipped.refused.is_empty() {
+                line.push_str(&format!("; {} could not be flipped (press Calc Camlocks first)", flipped.refused.join(", ")));
+            }
+            app.set_status(line, flipped.done.is_empty() || !flipped.visible.is_empty());
+        }
+    }
+    crate::scenario::publish_target("ledger:flip_cam", flip_rect);
+    width += flip_width;
+    let clear_label = "Clear holes";
+    let clear_width = button_width_at(ui, clear_label, 84.0) + 2.0 * INSET;
+    let clear_rect = Rect::from_min_size(pos2(x + width, top + 2.0), vec2(clear_width - 2.0 * INSET, BUTTON_HEIGHT));
+    if ribbon_button_icon(ui, "clear_holes", clear_rect, clear_label, false, false, Some("delete")).clicked() {
+        let n = crate::ledger_cams::clear_holes(app);
+        app.set_status(format!("{n} hole markers and the machine hole list cleared; the hardware is untouched"), false);
+    }
+    crate::scenario::publish_target("ledger:clear_holes", clear_rect);
+    width += clear_width;
+    // The same snap switch as beside the boards: here it keeps moved hardware on its joint.
+    let snap_rect = Rect::from_min_size(pos2(x + width, top + 2.0), vec2(SQUARE, BUTTON_HEIGHT));
+    let mut snap = SNAP_ON.load(std::sync::atomic::Ordering::Relaxed);
+    if ribbon_button_icon(ui, "hw_snap", snap_rect, "snap", false, snap, Some("align")).clicked() {
+        snap = !snap;
+        SNAP_ON.store(snap, std::sync::atomic::Ordering::Relaxed);
+        app.set_status(if snap { "snap on: moved hardware slides along its joint" } else { "snap off: hardware moves freely" }, false);
+    }
+    crate::scenario::publish_target("ledger:hw_snap", snap_rect);
+    width += SQUARE + INSET;
     group_caption(ui, area, x, width, "Camlocks & holes");
     x += width + PANEL_GAP;
+    keep_window(app, ui.ctx());
     x
+}
+
+/// Hand-changed fittings waiting for the operator's answer to a second Calc Camlocks.
+static PENDING_KEEP: std::sync::Mutex<Option<std::collections::BTreeSet<String>>> = std::sync::Mutex::new(None);
+
+/// "Keep my changes" / "Reset all to the rule" / Cancel.
+fn keep_window(app: &mut SolveApp, ctx: &egui::Context) {
+    let t = Tokens::get();
+    let mut guard = PENDING_KEEP.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(hand) = guard.as_ref() else { return };
+    let (closed, action) = crate::ui_kit::Window::new(egui::Id::new("sc_ledger_keep"), "edge_continuity", "Calc Camlocks")
+        .actions("Keep my changes", "Cancel", Some("Reset all to the rule"))
+        .show(ctx, true, |ui| {
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(format!(
+                        "{} {} moved or flipped by hand: {}.",
+                        hand.len(),
+                        if hand.len() == 1 { "fitting was" } else { "fittings were" },
+                        hand.iter().cloned().collect::<Vec<_>>().join(", ")
+                    ))
+                    .color(t.text),
+                )
+                .wrap(),
+            );
+            ui.label(
+                egui::RichText::new("Keep them where they are and place only the rest by the rule, or put everything back by the rule?")
+                    .color(t.text_dim),
+            );
+        });
+    let keep = match action {
+        crate::ui_kit::Action::Ok => Some(true),
+        crate::ui_kit::Action::Apply => Some(false),
+        crate::ui_kit::Action::Cancel => None,
+        _ if closed => None,
+        _ => return,
+    };
+    let hand = guard.take().expect("checked above");
+    drop(guard);
+    match keep {
+        Some(true) => {
+            let outcome = crate::ledger_cams::calc_keep(app, &hand);
+            app.set_status(format!("kept {} by hand; {}", hand.len(), outcome.message()), outcome.is_warning());
+        }
+        Some(false) => {
+            let outcome = crate::ledger_cams::calc(app);
+            app.set_status(format!("reset to the rule; {}", outcome.message()), outcome.is_warning());
+        }
+        None => app.set_status("Calc Camlocks cancelled - nothing changed", false),
+    }
 }
 
 /// The bodies selected in the model, by name: bodies only, because a face or an edge is not something a material covers.

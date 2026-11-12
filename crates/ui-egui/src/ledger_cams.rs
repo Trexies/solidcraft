@@ -86,12 +86,20 @@ impl Box3 {
     }
 }
 
-/// Whether a body name is one this tab writes: `cam 7`, `dowel 2`, `pin 1`, and Calc Holes' `hole 3`.
+/// Whether a body name is one this tab writes: `cam 7`, `dowel 2`, `wooden dowel 4`, `pin 1`, and Calc Holes' `hole 3`.
 pub(crate) fn is_marker_name(name: &str) -> bool {
     name.starts_with("cam ")
         || name.starts_with("dowel ")
+        || name.starts_with(WOODEN.word_prefix())
         || name.starts_with("pin ")
         || name.starts_with(crate::ledger_fittings::HOLE_MARKER)
+}
+
+/// Whether a body is hardware the Ledger tab's **edges** view keeps solid: a fitting or hole marker this tab drew, or
+/// a foot the Name button named. Everything else is a board, drawn as outlines only.
+pub(crate) fn stays_solid(name: &str) -> bool {
+    let lower = name.trim().to_ascii_lowercase();
+    is_marker_name(&lower) || lower == "foot" || lower.starts_with("foot ") || lower.starts_with("foot-")
 }
 
 /// The folder each kind of marker is filed in, by its name.
@@ -100,6 +108,8 @@ fn folder_of(name: &str) -> Option<&'static str> {
         Some("Cams")
     } else if name.starts_with("dowel ") {
         Some("Dowels")
+    } else if name.starts_with(WOODEN.word_prefix()) {
+        Some(WOODEN.folder)
     } else if name.starts_with("pin ") {
         Some("Shelf pins")
     } else if name.starts_with(crate::ledger_fittings::HOLE_MARKER) {
@@ -111,6 +121,36 @@ fn folder_of(name: &str) -> Option<&'static str> {
 
 /// The folder Calc Holes files its markers in.
 const HOLES: &str = "Holes";
+
+/// The desk's malleted ⌀8 x 10 dowel (the CAD team, 2026-11-12): named and filed apart from the 8 x 40.
+const WOODEN: ledger_holes::table_rules::DowelHardware = ledger_holes::table_rules::DowelHardware::WOODEN_8X10;
+
+trait WordPrefix {
+    fn word_prefix(&self) -> &'static str;
+}
+
+impl WordPrefix for ledger_holes::table_rules::DowelHardware {
+    /// `wooden dowel ` - the name's word and its space, which is what a numbered marker starts with.
+    fn word_prefix(&self) -> &'static str {
+        if self.word == WOODEN.word { "wooden dowel " } else { "dowel " }
+    }
+}
+
+/// The folder and word a station's fitting is filed and numbered under: a dowel by the bores it was drilled with, so
+/// the wooden one is never counted as an 8 x 40.
+fn family_of(fastener: Fastener, bores: &[&Hole]) -> (&'static str, &'static str) {
+    if fastener == Fastener::Dowel {
+        let depth = |kind: ledger_holes::HoleKind| bores.iter().find(|hole| hole.kind == kind).map(|hole| hole.depth);
+        let edge = depth(ledger_holes::HoleKind::DowelEdge);
+        let mate = depth(ledger_holes::HoleKind::DowelMateHole);
+        if let (Some(edge), Some(mate)) = (edge, mate) {
+            if let Some(dowel) = ledger_holes::table_rules::DowelHardware::of_bores(edge, mate) {
+                return (dowel.folder, dowel.word);
+            }
+        }
+    }
+    family(fastener)
+}
 
 /// The folder a kind of fastener is filed in, and the word its markers are numbered from.
 fn family(fastener: Fastener) -> (&'static str, &'static str) {
@@ -182,6 +222,30 @@ pub struct Outcome {
     /// The one thing a reader of the count needs to know about the standard, stated by the pass: which board it
     /// had to take for the desk's modesty, or that it could not name one. Empty when nothing needed saying.
     pub rule: String,
+    /// Joints left with no hardware because a board in them is 1/2" or thinner: "side (2) -> top (12.7 mm)".
+    pub too_thin: Vec<String>,
+}
+
+/// The joints a run refused for a board too thin for hardware, in words.
+fn thin_lines(panels: &[Panel], run: &Plan) -> Vec<String> {
+    let name = |id: u32| panels.iter().find(|p| p.id == id).map(|p| p.name.clone()).unwrap_or_else(|| format!("part {id}"));
+    run.too_thin
+        .iter()
+        .map(|(source, mate, thick)| format!("{} → {} ({:.1} mm board)", name(*source), name(*mate), thick))
+        .collect()
+}
+
+/// The warning for joints that got no hardware, or nothing when every joint got its fittings.
+pub fn thin_warning(lines: &[String]) -> Option<String> {
+    if lines.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "no hardware in 1/2\" board - {} {} left without cams or dowels: {}",
+        lines.len(),
+        if lines.len() == 1 { "joint" } else { "joints" },
+        lines.join(", ")
+    ))
 }
 
 /// `0 camlocks`, `1 camlock`, `46 camlocks` — the shop's plural, not a naive `s`.
@@ -196,6 +260,19 @@ impl Outcome {
     /// the stations are what the drawing now shows. A reader who sees only one of the three cannot tell a doubled joint
     /// from a missing one.
     pub fn message(&self) -> String {
+        let base = self.counts();
+        match thin_warning(&self.too_thin) {
+            Some(warning) => format!("{warning}. {base}"),
+            None => base,
+        }
+    }
+
+    /// Whether something the operator must act on was left undone.
+    pub fn is_warning(&self) -> bool {
+        !self.too_thin.is_empty()
+    }
+
+    fn counts(&self) -> String {
         if self.panels == 0 {
             return "no boards to count - a flat-pack carcass needs two boards meeting".to_owned();
         }
@@ -226,13 +303,29 @@ impl Outcome {
 /// Run the vendor's engine over the selected bodies - or all of them when nothing is selected - and draw one block
 /// per station (fastener) it fits.
 pub fn calc(app: &mut crate::SolveApp) -> Outcome {
+    calc_keep(app, &std::collections::BTreeSet::new())
+}
+
+/// [`calc`], keeping the fittings named in `keep` - the ones changed by hand - exactly where they are, and placing by
+/// the rule only the rest. One undo step.
+pub fn calc_keep(app: &mut crate::SolveApp, keep: &std::collections::BTreeSet<String>) -> Outcome {
+    crate::ledger_hand::as_one_step(app, "Calc Camlocks", |app| calc_inner(app, keep))
+}
+
+fn calc_inner(app: &mut crate::SolveApp, keep: &std::collections::BTreeSet<String>) -> Outcome {
     let Ok(measured) = app.session.execute("inspect.measure", &json!({})) else {
         return Outcome::default();
     };
     let bodies = boxes(&measured);
+    let records = crate::ledger_hand::load(app);
+    let kept: BTreeMap<String, crate::ledger_hand::Fitting> =
+        records.into_iter().filter(|(name, _)| keep.contains(name) && bodies.iter().any(|b| &b.name == name)).collect();
+    let kept_keys: std::collections::BTreeSet<String> = kept.values().map(|f| f.key.clone()).collect();
     // What an earlier click drew is cleared first: a second press redraws the marks, it never adds a second set on top
     // of the first (88 marks had piled up in the 48x72 that way, and every one of them was still listed in the tree).
-    let earlier: Vec<String> = bodies.iter().filter(|body| body.is_marker()).map(|body| body.name.clone()).collect();
+    // Hand-changed fittings the operator chose to keep stay.
+    let earlier: Vec<String> =
+        bodies.iter().filter(|body| body.is_marker() && !kept.contains_key(&body.name)).map(|body| body.name.clone()).collect();
     if !earlier.is_empty() {
         let _ = app.session.execute("solid.remove", &json!({ "bodies": earlier }));
     }
@@ -291,13 +384,26 @@ pub fn calc(app: &mut crate::SolveApp) -> Outcome {
     let mut filed: std::collections::BTreeMap<&'static str, Vec<String>> = std::collections::BTreeMap::new();
     let mut numbers: std::collections::BTreeMap<&'static str, usize> = std::collections::BTreeMap::new();
     let mut coloured: std::collections::BTreeMap<&'static str, Vec<String>> = std::collections::BTreeMap::new();
-    for (station, group) in stations.iter().zip(&placed) {
+    // Which fitting of the rule's layout each station is, so a kept hand-changed one is not placed a second time.
+    let board_boxes: BTreeMap<String, ([f64; 3], [f64; 3])> = bodies.iter().map(|b| (b.name.clone(), (b.lo, b.hi))).collect();
+    let keys = station_keys(&stations, &placed, &bores, &board_boxes);
+    let mut made_fittings: Vec<(String, usize)> = Vec::new();
+    let mut kept_stations = 0usize;
+    for (index, (station, group)) in stations.iter().zip(&placed).enumerate() {
         if drawn >= MOST_MARKERS {
             break;
         }
-        let (folder, word) = family(station.fastener);
+        if kept_keys.contains(&keys[index]) {
+            kept_stations += 1;
+            continue;
+        }
+        let (folder, word) = family_of(station.fastener, &bores[index]);
         let number = numbers.entry(word).or_insert(0);
         *number += 1;
+        // A kept fitting holds its name: the new ones count past it.
+        while kept.contains_key(&format!("{word} {number}")) {
+            *number += 1;
+        }
         let name = format!("{word} {number}");
         // The fitting as it is fitted - a housing turned to its bolt, a dowel across the seam - from the station's own
         // bores; the plain block only where the engine left the station without the bore the drawing is placed from.
@@ -332,9 +438,47 @@ pub fn calc(app: &mut crate::SolveApp) -> Outcome {
             continue;
         }
         coloured.entry(crate::ledger_fittings::colour(station.fastener)).or_default().extend(created.iter().cloned());
+        if let Some(first) = created.first() {
+            made_fittings.push((first.clone(), index));
+        }
         filed.entry(folder).or_default().extend(created);
         drawn += 1;
     }
+    // The record the holes follow from now on: each fitting's bores, where it stands, and its joint's line.
+    {
+        let now = crate::ledger_hand::boxes(app);
+        let mut record = kept;
+        for (name, index) in &made_fittings {
+            let Some(body) = now.get(name).copied() else { continue };
+            let group = &placed[*index];
+            let refs: Vec<&crate::ledger_fittings::Bore> = group.iter().collect();
+            let frames = group
+                .iter()
+                .map(|b| {
+                    panels
+                        .iter()
+                        .find(|p| p.name == b.board)
+                        .map_or(([1.0, 0.0, 0.0], [0.0, 1.0, 0.0]), |p| (p.frame.x, p.frame.y))
+                })
+                .collect();
+            record.insert(
+                name.clone(),
+                crate::ledger_hand::Fitting {
+                    key: keys[*index].clone(),
+                    bores: group.clone(),
+                    at: crate::ledger_hand::centre(body),
+                    seam: crate::ledger_hand::seam_of(&refs, &board_boxes),
+                    frames,
+                    flipped: false,
+                    hand: false,
+                },
+            );
+        }
+        crate::ledger_hand::save(app, &record);
+        let thin = thin_lines(&panels, &run);
+        crate::ledger_boards::set_ledger_entry(app, "too_thin", json!(thin));
+    }
+    let _ = kept_stations;
     for (colour, bodies) in &coloured {
         let _ = app.session.execute("appearance.assign", &json!({ "bodies": bodies, "color": colour }));
     }
@@ -356,7 +500,60 @@ pub fn calc(app: &mut crate::SolveApp) -> Outcome {
         unparsed: run.unparsed,
         standard,
         rule,
+        too_thin: thin_lines(&panels, &run),
     }
+}
+
+/// Which fitting of the rule's layout each station is: `source|mate|word|n`, `n` counting along the joint.
+fn station_keys(
+    stations: &[Station],
+    placed: &[Vec<crate::ledger_fittings::Bore>],
+    bores: &[Vec<&Hole>],
+    boards: &BTreeMap<String, ([f64; 3], [f64; 3])>,
+) -> Vec<String> {
+    let mut parts: Vec<(String, f64)> = Vec::new();
+    for (index, station) in stations.iter().enumerate() {
+        let group = &placed[index];
+        let source = group
+            .iter()
+            .find(|b| b.face == ledger_holes::Face::Edge)
+            .or_else(|| group.first())
+            .map(|b| b.board.clone())
+            .unwrap_or_default();
+        let mate = group.iter().map(|b| b.board.clone()).find(|b| *b != source).unwrap_or_default();
+        let word = family_of(station.fastener, &bores[index]).1;
+        let refs: Vec<&crate::ledger_fittings::Bore> = group.iter().collect();
+        let seam = crate::ledger_hand::seam_of(&refs, boards);
+        let along = station.at[0] * seam[0] + station.at[1] * seam[1] + station.at[2] * seam[2];
+        parts.push((format!("{source}|{mate}|{word}"), along));
+    }
+    let mut out = vec![String::new(); parts.len()];
+    for (index, (joint, along)) in parts.iter().enumerate() {
+        let n = parts.iter().filter(|(j, a)| j == joint && *a < *along - 0.01).count();
+        out[index] = format!("{joint}|{n}");
+    }
+    out
+}
+
+/// What recalculating would give on the design as a resize would leave it: `(cams, dowels, refused joints)`.
+pub fn dry_run(app: &crate::SolveApp, after: &[crate::ledger_resize::Box3]) -> (usize, usize, Vec<String>) {
+    let bodies: Vec<Box3> = after.iter().map(|b| Box3 { name: b.name.clone(), lo: b.lo, hi: b.hi }).collect();
+    let Ok((panels, run, _, _)) = engine_on(app, bodies) else {
+        return (0, 0, Vec::new());
+    };
+    let count = |kind: ledger_holes::HoleKind| run.holes.iter().filter(|hole| hole.kind == kind).count();
+    (count(ledger_holes::HoleKind::EdgeBolt), count(ledger_holes::HoleKind::DowelEdge), thin_lines(&panels, &run))
+}
+
+/// Whether the design has cams, dowels or hole markers this tab drew - something a resize leaves behind.
+pub fn has_markers(app: &mut crate::SolveApp) -> (bool, bool) {
+    let Ok(measured) = app.session.execute("inspect.measure", &json!({})) else {
+        return (false, false);
+    };
+    let names: Vec<String> = boxes(&measured).into_iter().map(|b| b.name).collect();
+    let fittings = names.iter().any(|n| n.starts_with("cam ") || n.starts_with("dowel ") || n.starts_with(WOODEN.word_prefix()) || n.starts_with("pin "));
+    let holes = names.iter().any(|n| n.starts_with(crate::ledger_fittings::HOLE_MARKER));
+    (fittings, holes)
 }
 
 /// The engine's run over the bodies in the drawing - the selected ones, or all of them - leaving out what this tab
@@ -366,14 +563,19 @@ fn engine(app: &mut crate::SolveApp) -> Result<(Vec<Panel>, Plan, Option<&'stati
         return Err(0);
     };
     let bodies = boxes(&measured);
-    // A selection narrows the pass to those bodies, which is what a person who picked two panels meant. Nothing selected
-    // is every body in the drawing.
+    engine_on(app, bodies)
+}
+
+/// [`engine`] over boxes the caller supplies - the design as a resize *would* leave it, for the preview.
+fn engine_on(app: &crate::SolveApp, bodies: Vec<Box3>) -> Result<(Vec<Panel>, Plan, Option<&'static str>, String), usize> {
+    // A selection narrows the pass to those boards, which is what a person who picked two panels meant. Selected hardware
+    // (a cam picked to flip, a foot) narrows nothing: with only that selected, the pass found no boards at all.
     let selected: BTreeSet<String> = app
         .session
         .selection
         .iter()
         .filter_map(|sel| match sel {
-            solidcraft_engine::Sel::Body { name } => Some(name.clone()),
+            solidcraft_engine::Sel::Body { name } if !is_marker_name(name) && !stays_solid(name) => Some(name.clone()),
             _ => None,
         })
         .collect();
@@ -407,6 +609,86 @@ fn engine(app: &mut crate::SolveApp) -> Result<(Vec<Panel>, Plan, Option<&'stati
 
 /// Calc Holes: draw every bore the engine drills as a marker, replacing an earlier press's, and keep the list.
 pub fn holes(app: &mut crate::SolveApp) -> crate::ledger_fittings::HolesOutcome {
+    crate::ledger_hand::as_one_step(app, "Calc Holes", holes_inner)
+}
+
+/// Take the hole markers and the machine list out, leaving the hardware. One undo step.
+pub fn clear_holes(app: &mut crate::SolveApp) -> usize {
+    crate::ledger_hand::as_one_step(app, "Clear holes", |app| {
+        let names: Vec<String> = crate::ledger_hand::boxes(app)
+            .into_keys()
+            .filter(|name| name.starts_with(crate::ledger_fittings::HOLE_MARKER))
+            .collect();
+        if !names.is_empty() {
+            let _ = app.session.execute("solid.remove", &json!({ "bodies": names }));
+        }
+        crate::ledger_boards::set_ledger_entry(
+            app,
+            "bores",
+            json!({ "format": "ledger-bores/1", "units": "mm", "holes": [], "cleared": true }),
+        );
+        refile(app);
+        names.len()
+    })
+}
+
+/// Calc Holes from the fittings as they stand: each one's bores where it was moved to and on the face it was flipped
+/// to, every bore checked. `None` when the design has no recorded fitting (an older design, or none drawn yet).
+fn holes_from_fittings(app: &mut crate::SolveApp, uncut: usize) -> Option<crate::ledger_fittings::HolesOutcome> {
+    let mut records = crate::ledger_hand::load(app);
+    let now = crate::ledger_hand::boxes(app);
+    records.retain(|name, _| now.contains_key(name));
+    if records.is_empty() {
+        return None;
+    }
+    let mut all: Vec<(String, crate::ledger_fittings::Bore)> = Vec::new();
+    let mut changed = false;
+    for (number, (name, fitting)) in records.iter_mut().enumerate() {
+        let here = crate::ledger_hand::centre(now[name]);
+        if fitting.moved(here) && !fitting.hand {
+            fitting.hand = true;
+            changed = true;
+        }
+        for mut bore in crate::ledger_hand::bores_now(fitting, here) {
+            // One station per fitting, numbered afresh: kept fittings and new ones came from different runs.
+            bore.station = u32::try_from(number + 1).unwrap_or(u32::MAX);
+            all.push((name.clone(), bore));
+        }
+    }
+    if changed {
+        let mut every = crate::ledger_hand::load(app);
+        for (name, fitting) in &records {
+            every.insert(name.clone(), fitting.clone());
+        }
+        crate::ledger_hand::save(app, &every);
+    }
+    let mut problems = Vec::new();
+    for name in records.keys() {
+        let mine: Vec<crate::ledger_fittings::Bore> = all.iter().filter(|(n, _)| n == name).map(|(_, b)| b.clone()).collect();
+        problems.extend(crate::ledger_hand::check(name, &mine, &now, &all));
+    }
+    let thin: Vec<String> = crate::ledger_boards::ledger_meta(app)
+        .get("too_thin")
+        .and_then(Value::as_array)
+        .map(|list| list.iter().filter_map(Value::as_str).map(str::to_owned).collect())
+        .unwrap_or_default();
+    let blocked = if !problems.is_empty() {
+        Some(format!("{} hardware problem(s): {}", problems.len(), problems.join("; ")))
+    } else if !thin.is_empty() {
+        Some("joints without hardware: a board is 1/2\" or thinner".to_owned())
+    } else {
+        None
+    };
+    let bores: Vec<crate::ledger_fittings::Bore> = all.into_iter().map(|(_, b)| b).collect();
+    let mut outcome = crate::ledger_fittings::mark(app, &bores, blocked);
+    outcome.uncut = uncut;
+    outcome.too_thin = thin;
+    outcome.problems = problems;
+    refile(app);
+    Some(outcome)
+}
+
+fn holes_inner(app: &mut crate::SolveApp) -> crate::ledger_fittings::HolesOutcome {
     let uncut = crate::ledger_fittings::clear_bores(app);
     if let Ok(measured) = app.session.execute("inspect.measure", &json!({})) {
         let earlier: Vec<String> = boxes(&measured)
@@ -417,6 +699,9 @@ pub fn holes(app: &mut crate::SolveApp) -> crate::ledger_fittings::HolesOutcome 
         if !earlier.is_empty() {
             let _ = app.session.execute("solid.remove", &json!({ "bodies": earlier }));
         }
+    }
+    if let Some(outcome) = holes_from_fittings(app, uncut) {
+        return outcome;
     }
     let (panels, run, _, _) = match engine(app) {
         Ok(found) => found,
@@ -446,8 +731,11 @@ pub fn holes(app: &mut crate::SolveApp) -> crate::ledger_fittings::HolesOutcome 
             ..Default::default()
         };
     }
-    let mut outcome = crate::ledger_fittings::mark(app, &bores);
+    let refused = thin_lines(&panels, &run);
+    let blocked = (!refused.is_empty()).then(|| "joints without hardware: a board is 1/2\" or thinner".to_owned());
+    let mut outcome = crate::ledger_fittings::mark(app, &bores, blocked);
     outcome.uncut = uncut;
+    outcome.too_thin = refused;
     refile(app);
     outcome
 }
@@ -541,6 +829,7 @@ fn current() -> Option<Current> {
 fn is_hardware_folder(group: &solidcraft_engine::doc::BrowserGroup) -> bool {
     let named = group.name == HARDWARE
         || [Fastener::Cam, Fastener::Dowel, Fastener::ShelfPin].iter().any(|f| family(*f).0 == group.name)
+        || group.name == WOODEN.folder
         || group.name == HOLES;
     named && group.items.iter().all(|item| is_marker_name(item))
 }

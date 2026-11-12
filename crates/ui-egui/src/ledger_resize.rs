@@ -206,6 +206,15 @@ pub fn plan_all(boxes: &[Box3], bodies: &[String], thickness: f64) -> Result<Pla
     Ok(all)
 }
 
+/// The boxes as [`plan_all`] would leave them, for a dry run of the hole engine.
+pub fn after_all(boxes: &[Box3], bodies: &[String], thickness: f64) -> Result<Vec<Box3>, String> {
+    let mut now = boxes.to_vec();
+    for body in bodies {
+        now = plan(&now, body, thickness)?.1;
+    }
+    Ok(now)
+}
+
 /// Carry a plan out. All or nothing: a refused step puts the design back as it was.
 pub fn apply(app: &mut crate::SolveApp, plan: &Plan) -> Result<(), String> {
     let mark = app.session.checkpoint();

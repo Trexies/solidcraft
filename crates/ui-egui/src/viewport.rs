@@ -556,6 +556,7 @@ fn scene_key(app: &SolveApp) -> u64 {
     app.session.colored_components.hash(&mut h);
     (std::sync::Arc::as_ptr(&crate::open_meshing::shown_world(app)) as usize).hash(&mut h);
     app.ui.visual_style.hash(&mut h);
+    crate::ledger_boards::solid_hardware(app).hash(&mut h);
     app.preferences.vertex_markers.hash(&mut h);
     app.ui.ground_shadow.hash(&mut h);
     solidcraft_engine::doc::display_quality::current().hash(&mut h);
@@ -720,7 +721,9 @@ fn drawn_plan(
     b: &solidcraft_engine::doc::ModelBody,
     opaque: bool,
 ) -> Option<std::sync::Arc<solidcraft_engine::geom::tess::TessPlan>> {
-    let shaded = app.ui.visual_style != 2;
+    // The Ledger tab's edges view draws hardware shaded in wireframe, from its plan as the shaded view does: an imported
+    // foot's inward-facing sides vanish from a CPU-built block.
+    let shaded = app.ui.visual_style != 2 || (crate::ledger_boards::solid_hardware(app) && crate::ledger_cams::stays_solid(&b.name));
     (shaded && opaque && app.viewport.gpu.is_some_and(|g| g.tess))
         .then(|| refined(app, b).map(|(plan, _)| plan).or_else(|| b.display_plan()))
         .flatten()
@@ -1420,6 +1423,11 @@ pub(crate) fn build_scene(app: &SolveApp) -> GpuScene {
         _ => (true, true),
     };
     let edge_col = if shaded { c4(tk.body_edge) } else { c4(tk.text) };
+    // The Ledger tab's edges view: boards as outlines, hardware (cams, dowels, hole markers, feet) shaded, built in a
+    // block of its own so the boards' blocks stay the plain wireframe ones.
+    let solid_hardware = !shaded && crate::ledger_boards::solid_hardware(app);
+    let mut hardware: Vec<BodyDraw> = Vec::new();
+    let mut hardware_key = std::collections::hash_map::DefaultHasher::new();
     // Shaded with hidden edges: edges behind the model show faintly.
     let hidden_edges = app.ui.visual_style == 3;
     // Vertex markers are an option (#7834), off by default.
@@ -1572,6 +1580,11 @@ pub(crate) fn build_scene(app: &SolveApp) -> GpuScene {
                 hidden_edge: slots.hidden_edge,
             },
         };
+        if solid_hardware && crate::ledger_cams::stays_solid(&body.name) {
+            body.key(true, edges, hidden_edges, markers).hash(&mut hardware_key);
+            hardware.push(body);
+            continue;
+        }
         let key = body.key(shaded, edges, hidden_edges, markers);
         key.hash(&mut run_key);
         run.push(body);
@@ -1585,6 +1598,10 @@ pub(crate) fn build_scene(app: &SolveApp) -> GpuScene {
     }
     if !run.is_empty() {
         push_block(&mut sc, &mut kept, &mut made, run_key.finish(), run, shaded, |d, out| d.build(out, shaded, edges, hidden_edges, markers));
+    }
+    if !hardware.is_empty() {
+        "solid hardware".hash(&mut hardware_key);
+        push_block(&mut sc, &mut kept, &mut made, hardware_key.finish(), hardware, true, |d, out| d.build(out, true, edges, hidden_edges, markers));
     }
     // Where each CPU-built body's triangles are in the model's blocks, for whole-body
     // highlights (see `highlight_block_tris`).
