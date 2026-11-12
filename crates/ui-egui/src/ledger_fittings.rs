@@ -245,6 +245,8 @@ pub fn fitting_steps(fastener: Fastener, bores: &[&Bore]) -> Option<Vec<Step>> {
                     "diameter": 5.0, "height": 16.0 }),
             }])
         }
+        // A foot's screw is a hole, not a fitting body of its own: it is never drawn here.
+        Fastener::Screw => None,
     }
 }
 
@@ -254,6 +256,7 @@ pub fn colour(fastener: Fastener) -> &'static str {
         Fastener::Cam => "#A9AEB4",
         Fastener::Dowel => "#C9A66B",
         Fastener::ShelfPin => "#8E9399",
+        Fastener::Screw => "#8E9399",
     }
 }
 
@@ -400,7 +403,7 @@ pub fn mark(app: &mut crate::SolveApp, bores: &[Bore], blocked: Option<String>) 
         *sizes.entry(((bore.dia * 10.0).round() as i64, (bore.depth * 10.0).round() as i64)).or_default() += 1;
         record.push(json!({
             "board": bore.board,
-            "fitting": match bore.fastener() { Fastener::Cam => "cam", Fastener::Dowel => "dowel", Fastener::ShelfPin => "pin" },
+            "fitting": match bore.fastener() { Fastener::Cam => "cam", Fastener::Dowel => "dowel", Fastener::ShelfPin => "pin", Fastener::Screw => "screw" },
             "bore": format!("{:?}", bore.kind),
             "station": bore.station,
             "face": match bore.face { Face::Front => "front", Face::Back => "back", Face::Edge => "edge" },

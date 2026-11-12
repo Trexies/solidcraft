@@ -158,6 +158,7 @@ fn family(fastener: Fastener) -> (&'static str, &'static str) {
         Fastener::Cam => ("Cams", "cam"),
         Fastener::Dowel => ("Dowels", "dowel"),
         Fastener::ShelfPin => ("Shelf pins", "pin"),
+        Fastener::Screw => ("Holes", "screw"),
     }
 }
 
@@ -176,6 +177,68 @@ fn boxes(value: &Value) -> Vec<Box3> {
         };
         let (Some(lo), Some(hi)) = (corner("min"), corner("max")) else { continue };
         out.push(Box3 { name: name.to_owned(), lo, hi });
+    }
+    out
+}
+
+/// The bore a foot's fixing screw needs: ⌀8 × 25 mm, straight up into the board the foot sits under, centred on the
+/// foot's footprint. Auto-detected: for each foot, the board directly above whose bottom face it touches.
+fn foot_screws(bodies: &[Box3]) -> Vec<crate::ledger_fittings::Bore> {
+    const DIA: f64 = 8.0;
+    const DEPTH: f64 = 25.0;
+    let mut out = Vec::new();
+    for foot in bodies.iter().filter(|b| stays_solid(&b.name) && !is_marker_name(&b.name)) {
+        let cx = (foot.lo[0] + foot.hi[0]) / 2.0;
+        let cy = (foot.lo[1] + foot.hi[1]) / 2.0;
+        let top = foot.hi[2];
+        // The board whose footprint the foot's centre sits in, and whose bottom face is nearest the foot's top: the
+        // board the foot is screwed up into. A foot tucked a hair past the bottom edge still counts (the screw leaves
+        // the foot's top and enters the board's underside).
+        let above = bodies
+            .iter()
+            .filter(|b| !stays_solid(&b.name) && !b.is_marker())
+            .filter(|b| {
+                b.lo[0] <= cx && cx <= b.hi[0] && b.lo[1] <= cy && cy <= b.hi[1] && b.hi[2] > top
+                    && (b.lo[2] - top).abs() < 6.0
+            })
+            .min_by(|a, b| (a.lo[2] - top).abs().total_cmp(&(b.lo[2] - top).abs()));
+        let Some(board) = above else { continue };
+        // The screw leaves the foot's top face at the foot's centre and drills straight up into the board above.
+        let mouth = [cx, cy, top];
+        let dir = [0.0, 0.0, 1.0];
+        // The board's own frame, so the machine-list x/y read from its corner like every other bore.
+        let size = [board.hi[0] - board.lo[0], board.hi[1] - board.lo[1], board.hi[2] - board.lo[2]];
+        let thin = (0..3).min_by(|a, b| size[*a].total_cmp(&size[*b])).unwrap_or(2);
+        let long = (0..3).max_by(|a, b| size[*a].total_cmp(&size[*b])).unwrap_or(0);
+        let across = (0..3).find(|k| *k != thin && *k != long).unwrap_or(1);
+        let axis = |k: usize| {
+            let mut v = [0.0, 0.0, 0.0];
+            v[k] = 1.0;
+            v
+        };
+        let frame = ledger_holes::Frame {
+            origin: [
+                (board.lo[0] + board.hi[0]) / 2.0,
+                (board.lo[1] + board.hi[1]) / 2.0,
+                (board.lo[2] + board.hi[2]) / 2.0,
+            ],
+            x: axis(long),
+            y: axis(across),
+            z: axis(thin),
+        };
+        let local = frame.to_local(mouth);
+        out.push(crate::ledger_fittings::Bore {
+            board: board.name.clone(),
+            kind: ledger_holes::HoleKind::Screw,
+            station: 0,
+            face: ledger_holes::Face::Back,
+            mouth,
+            dir,
+            dia: DIA,
+            depth: DEPTH,
+            local: [local[0] + size[long] / 2.0, local[1] + size[across] / 2.0, local[2] + size[thin] / 2.0],
+            panel: [size[long], size[across], size[thin]],
+        });
     }
     out
 }
@@ -679,7 +742,11 @@ fn holes_from_fittings(app: &mut crate::SolveApp, uncut: usize) -> Option<crate:
     } else {
         None
     };
-    let bores: Vec<crate::ledger_fittings::Bore> = all.into_iter().map(|(_, b)| b).collect();
+    let mut bores: Vec<crate::ledger_fittings::Bore> = all.into_iter().map(|(_, b)| b).collect();
+    // A foot is screwed to the board it sits under: its ⌀8 × 25 hole is added over whatever the fittings placed.
+    if let Ok(measured) = app.session.execute("inspect.measure", &json!({})) {
+        bores.extend(foot_screws(&boxes(&measured)));
+    }
     let mut outcome = crate::ledger_fittings::mark(app, &bores, blocked);
     outcome.uncut = uncut;
     outcome.too_thin = thin;
@@ -718,11 +785,15 @@ fn holes_inner(app: &mut crate::SolveApp) -> crate::ledger_fittings::HolesOutcom
             };
         }
     };
-    let bores: Vec<crate::ledger_fittings::Bore> = run
+    let mut bores: Vec<crate::ledger_fittings::Bore> = run
         .holes
         .iter()
         .filter_map(|hole| panels.iter().find(|panel| panel.id == hole.part_id).map(|panel| crate::ledger_fittings::bore(panel, hole)))
         .collect();
+    // A foot is screwed to the board it sits under: its ⌀8 × 25 hole is added over the engine's joints.
+    if let Ok(measured) = app.session.execute("inspect.measure", &json!({})) {
+        bores.extend(foot_screws(&boxes(&measured)));
+    }
     if bores.is_empty() {
         refile(app);
         return crate::ledger_fittings::HolesOutcome {
@@ -873,5 +944,64 @@ fn file_under_hardware(app: &mut crate::SolveApp, filed: &std::collections::BTre
         let _ = app
             .session
             .execute("browser.group", &json!({ "folder": "bodies", "component": component, "name": folder, "parent": parent, "items": names }));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn b(name: &str, lo: [f64; 3], hi: [f64; 3]) -> Box3 {
+        Box3 { name: name.into(), lo, hi }
+    }
+
+    #[test]
+    fn a_foot_gets_one_screw_into_the_board_above_it() {
+        // The desk's front-left corner: a 21 mm foot on the floor, the left side's bottom edge over it.
+        let bodies = vec![
+            b("foot - front left", [0.44, -458.34, -1.75], [21.78, -437.01, 8.76]),
+            b("side", [1.59, -600.07, 7.01], [20.64, 0.0, 736.6]),
+        ];
+        let screws = foot_screws(&bodies);
+        assert_eq!(screws.len(), 1, "{screws:?}");
+        let s = &screws[0];
+        assert_eq!(s.board, "side");
+        assert_eq!(s.kind, ledger_holes::HoleKind::Screw);
+        // Centred on the foot's footprint, leaving the foot's top face, drilling straight up.
+        assert!((s.mouth[0] - 11.11).abs() < 1e-9 && (s.mouth[1] + 447.675).abs() < 1e-9, "{:?}", s.mouth);
+        assert!((s.mouth[2] - 8.76).abs() < 1e-6, "{:?}", s.mouth);
+        assert_eq!(s.dir, [0.0, 0.0, 1.0]);
+        assert_eq!(s.dia, 8.0);
+        assert_eq!(s.depth, 25.0);
+        assert_eq!(s.face, ledger_holes::Face::Back);
+    }
+
+    #[test]
+    fn a_foot_under_nothing_gets_no_screw() {
+        let bodies = vec![b("foot - front left", [0.44, -458.34, -1.75], [21.78, -437.01, 8.76])];
+        assert!(foot_screws(&bodies).is_empty());
+    }
+
+    #[test]
+    fn the_desks_four_feet_each_screw_into_their_side() {
+        // The owner's desk (SOL-DKS-2448), feet and sides only: every foot lands in the side it stands under.
+        let bodies = vec![
+            b("foot - front left", [0.44, -458.34, -1.75], [21.78, -437.01, 8.76]),
+            b("foot - rear left", [0.44, -163.07, -1.75], [21.78, -141.73, 8.76]),
+            b("foot - front right", [1177.97, -458.34, -1.75], [1199.31, -437.01, 8.76]),
+            b("foot - rear right", [1177.97, -163.07, -1.75], [1199.31, -141.73, 8.76]),
+            b("left side", [1.59, -600.07, 7.01], [20.64, 0.0, 736.6]),
+            b("right side", [1179.12, -600.08, 7.01], [1198.17, 0.0, 736.6]),
+        ];
+        let screws = foot_screws(&bodies);
+        assert_eq!(screws.len(), 4, "{screws:?}");
+        let left = screws.iter().filter(|s| s.board == "left side").count();
+        let right = screws.iter().filter(|s| s.board == "right side").count();
+        assert_eq!((left, right), (2, 2), "{screws:?}");
+        for s in &screws {
+            assert_eq!(s.dia, 8.0);
+            assert_eq!(s.depth, 25.0);
+            assert_eq!(s.dir, [0.0, 0.0, 1.0]);
+        }
     }
 }

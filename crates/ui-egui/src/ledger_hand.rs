@@ -82,6 +82,7 @@ fn kind_from(name: &str) -> Option<HoleKind> {
         "DowelEdge" => HoleKind::DowelEdge,
         "DowelMateHole" => HoleKind::DowelMateHole,
         "ShelfPin" => HoleKind::ShelfPin,
+        "Screw" => HoleKind::Screw,
         _ => return None,
     })
 }
@@ -253,6 +254,29 @@ pub fn flipped_cup(cup: &Bore, board: ([f64; 3], [f64; 3])) -> Bore {
     b
 }
 
+/// A cam's bolt or mate mirrored across its board when the housing flips to the other face: they ride a
+/// fixed distance off the housing's face, so they follow it. `thick_axis` is the cup's board's thickness
+/// axis; the bore's board-frame position moves the same way `bores_now` tracks a slide, and the bolt (which
+/// shares the cup's board) mirrors its thickness coordinate.
+fn flip_ridden_bore(
+    mut bore: Bore,
+    frame: ([f64; 3], [f64; 3]),
+    pivot: [f64; 3],
+    thick_axis: usize,
+    cup_board: &str,
+) -> Bore {
+    let old = bore.mouth;
+    bore.mouth[thick_axis] = 2.0 * pivot[thick_axis] - bore.mouth[thick_axis];
+    let delta = sub(bore.mouth, old);
+    let ys = if bore.face == Face::Back { -1.0 } else { 1.0 };
+    bore.local[0] += dot(delta, frame.0);
+    bore.local[1] += ys * dot(delta, frame.1);
+    if bore.board == cup_board {
+        bore.local[2] = bore.panel[2] - bore.local[2];
+    }
+    bore
+}
+
 /// What is wrong with one fitting's bores against the boards as they stand, in words; empty when nothing is.
 pub fn check(
     name: &str,
@@ -308,6 +332,7 @@ fn short(kind: HoleKind) -> &'static str {
         HoleKind::MatePreHole => "pilot",
         HoleKind::DowelEdge | HoleKind::DowelMateHole => "dowel",
         HoleKind::ShelfPin => "pin",
+        HoleKind::Screw => "screw",
     }
 }
 
@@ -402,8 +427,11 @@ pub fn flip(app: &mut crate::SolveApp, chosen: &[String]) -> Flipped {
             continue;
         };
         // The model turns half a turn about the bolt's own line: the housing goes to the other face and still opens
-        // toward its bolt, which stays where it is.
-        let pivot = bolt.mouth;
+        // toward its bolt, which stays where it is. The turn is about the board's mid-thickness, not the bolt's mouth
+        // (which can sit a hair off the mid-plane), or the housing lands short of the opposite face.
+        let thick_axis = axis_of(bores[cup].dir);
+        let mut pivot = bolt.mouth;
+        pivot[thick_axis] = (board.0[thick_axis] + board.1[thick_axis]) / 2.0;
         let moved = app.session.execute("solid.move", &json!({ "bodies": [name], "translate": scale(pivot, -1.0) })).is_ok()
             && app.session.execute("solid.move", &json!({ "bodies": [name], "axis": bolt.dir, "angle": "180 deg" })).is_ok()
             && app.session.execute("solid.move", &json!({ "bodies": [name], "translate": pivot })).is_ok();
@@ -413,6 +441,16 @@ pub fn flip(app: &mut crate::SolveApp, chosen: &[String]) -> Flipped {
         }
         let mut bores = bores;
         bores[cup] = flipped_cup(&bores[cup], board);
+        // The bolt and its mate ride 9 mm off the housing's face, so the half-turn carries them across the
+        // board with it too: mirror each about the board's mid-thickness.
+        let cup_board = bores[cup].board.clone();
+        for i in 0..bores.len() {
+            if i == cup {
+                continue;
+            }
+            let frame = fitting.frames.get(i).copied().unwrap_or(([1.0, 0.0, 0.0], [0.0, 1.0, 0.0]));
+            bores[i] = flip_ridden_bore(bores[i].clone(), frame, pivot, thick_axis, &cup_board);
+        }
         if on_visible_face(&bores[cup], board, piece) {
             out.visible.push(name.clone());
         }
@@ -536,6 +574,27 @@ mod tests {
         let mut bores = cam();
         bores[1] = flipped;
         assert!(check("cam 1", &bores, &boards(), &[]).is_empty());
+    }
+
+    #[test]
+    fn the_bolt_and_mate_follow_the_housing_across_the_board() {
+        // A cam 1-style bolt: 9 mm off its board's front face (local[2] = 10.05), in the cup's board.
+        let mut bolt = bore("panel - front", HoleKind::EdgeBolt, Face::Edge, [20.6375, -580.5, 57.8104], [1.0, 0.0, 0.0], 8.0, 34.0);
+        bolt.local = [0.0, 678.7896, 10.05];
+        bolt.panel = [1158.478, 729.5896, 19.05];
+        let pivot = [20.6375, -581.025, 57.8104];
+        let flipped = flip_ridden_bore(bolt, ([1.0, 0.0, 0.0], [0.0, 0.0, -1.0]), pivot, 1, "panel - front");
+        assert!((flipped.mouth[1] + 581.55).abs() < 1e-6, "{flipped:?}");
+        assert!((flipped.local[2] - 9.0).abs() < 1e-6, "the bolt's thickness position mirrors: {flipped:?}");
+
+        // The mate lives in the other board, so its thickness coordinate is left alone and its depth follows.
+        let mut mate = bore("side (2)", HoleKind::MatePreHole, Face::Front, [20.6375, -580.5, 57.8104], [-1.0, 0.0, 0.0], 5.0, 12.0);
+        mate.local = [678.7896, 19.575, 19.05];
+        mate.panel = [729.5896, 600.075, 19.05];
+        let flipped_mate = flip_ridden_bore(mate, ([0.0, 0.0, -1.0], [-0.0, 1.0, 0.0]), pivot, 1, "panel - front");
+        assert!((flipped_mate.mouth[1] + 581.55).abs() < 1e-6, "{flipped_mate:?}");
+        assert!((flipped_mate.local[1] - 18.525).abs() < 1e-6, "{flipped_mate:?}");
+        assert!((flipped_mate.local[2] - 19.05).abs() < 1e-6, "the mate's thickness is left alone: {flipped_mate:?}");
     }
 
     #[test]
