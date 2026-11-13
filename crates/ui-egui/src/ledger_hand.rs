@@ -28,7 +28,7 @@ pub const KEY: &str = "fittings";
 /// A move smaller than this, in mm, is not a move: a re-measured box differs by hundredths.
 const MOVED_MM: f64 = 0.05;
 /// How close to a board's edge or face a bore's wall may come, in mm.
-const RIM_MM: f64 = 3.0;
+pub(crate) const RIM_MM: f64 = 3.0;
 /// Board left under the bottom of a blind bore, in mm.
 const FLOOR_MM: f64 = 0.5;
 
@@ -83,6 +83,7 @@ fn kind_from(name: &str) -> Option<HoleKind> {
         "DowelMateHole" => HoleKind::DowelMateHole,
         "ShelfPin" => HoleKind::ShelfPin,
         "Screw" => HoleKind::Screw,
+        "HandleBolt" => HoleKind::HandleBolt,
         _ => return None,
     })
 }
@@ -337,6 +338,7 @@ fn short(kind: HoleKind) -> &'static str {
         HoleKind::DowelEdge | HoleKind::DowelMateHole => "dowel",
         HoleKind::ShelfPin => "pin",
         HoleKind::Screw => "screw",
+        HoleKind::HandleBolt => "handle bolt",
     }
 }
 

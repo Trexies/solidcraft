@@ -72,6 +72,11 @@ fn boxes(value: &Value) -> Vec<Box3> {
     };
     for body in list {
         let Some(name) = body.get("name").and_then(Value::as_str) else { continue };
+        // Hardware is never edgebanding: a handle's bar is as thin as a band profile and sits by a door, and joining it
+        // into the door would make the door a handle.
+        if crate::ledger_cams::stays_solid(name) {
+            continue;
+        }
         let Some(bbox) = body.get("bbox") else { continue };
         let corner = |key: &str| -> Option<[f64; 3]> {
             let list = bbox.get(key)?.as_array()?;

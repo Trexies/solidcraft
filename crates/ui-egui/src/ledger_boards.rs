@@ -2112,7 +2112,7 @@ fn add_dropdown(app: &mut SolveApp, ui: &egui::Ui, rect: Rect) {
         .frame(crate::ui_kit::Container::menu_frame())
         .show(|ui| {
             ui.label(
-                egui::RichText::new("select the two boards it joins (a foot screw: the board above the foot)")
+                egui::RichText::new("select the two boards it joins (a foot screw: the board above the foot; a handle: the board it goes on)")
                     .size(Tokens::get().font_small)
                     .color(Tokens::get().text_dim),
             );

@@ -29,16 +29,18 @@ pub enum Add {
     Cam,
     WoodenDowel,
     FootScrew,
+    Handle,
 }
 
 impl Add {
-    pub const ALL: [Add; 3] = [Add::Cam, Add::WoodenDowel, Add::FootScrew];
+    pub const ALL: [Add; 4] = [Add::Cam, Add::WoodenDowel, Add::FootScrew, Add::Handle];
 
     pub fn label(self) -> &'static str {
         match self {
             Add::Cam => "Cam",
             Add::WoodenDowel => "Wooden dowel",
             Add::FootScrew => "Foot screw",
+            Add::Handle => "Handle",
         }
     }
 
@@ -47,6 +49,7 @@ impl Add {
             Add::Cam => Fastener::Cam,
             Add::WoodenDowel => Fastener::Dowel,
             Add::FootScrew => Fastener::Screw,
+            Add::Handle => Fastener::Handle,
         }
     }
 }
@@ -133,6 +136,9 @@ pub fn add(app: &mut crate::SolveApp, what: Add) -> Result<String, String> {
 }
 
 fn add_inner(app: &mut crate::SolveApp, what: Add) -> Result<String, String> {
+    if what == Add::Handle {
+        return add_handle(app);
+    }
     let Ok(measured) = app.session.execute("inspect.measure", &json!({})) else {
         return Err("could not read the design".to_owned());
     };
@@ -165,6 +171,7 @@ fn add_inner(app: &mut crate::SolveApp, what: Add) -> Result<String, String> {
             let screw = ledger_cams::bore_at(panel, HoleKind::Screw, [cx, cy, board.lo[2]], [0.0, 0.0, 1.0], 8.0, 25.0, 0);
             (vec![screw], board.name.clone(), String::new(), [0.0; 3])
         }
+        Add::Handle => return Err("a handle is added on its own".to_owned()),
         Add::Cam | Add::WoodenDowel => {
             let [a, b] = boards.as_slice() else {
                 return Err(format!(
@@ -217,6 +224,7 @@ fn add_inner(app: &mut crate::SolveApp, what: Add) -> Result<String, String> {
         Add::Cam => "cam",
         Add::WoodenDowel => "wooden dowel",
         Add::FootScrew => "screw",
+        Add::Handle => "handle",
     };
     let mut number = 1;
     while bodies.iter().any(|b| b.name == format!("{word} {number}")) {
@@ -254,6 +262,43 @@ fn add_inner(app: &mut crate::SolveApp, what: Add) -> Result<String, String> {
         Add::FootScrew => format!("{body} added under {edge} - move it if it is not where the foot is, then press Calc Holes"),
         _ => format!("{body} added on {edge} into {face} - move it along the joint if it is not where you want it, then press Calc Holes"),
     })
+}
+
+/// A bar handle on the one board picked, in the middle of its outside face; the operator moves it from there. It needs
+/// no record: Calc Holes reads where the handle stands.
+fn add_handle(app: &mut crate::SolveApp) -> Result<String, String> {
+    let Ok(measured) = app.session.execute("inspect.measure", &json!({})) else {
+        return Err("could not read the design".to_owned());
+    };
+    let bodies = ledger_cams::boxes(&measured);
+    let chosen = crate::ledger_resize::selected(app);
+    let boards: Vec<&Box3> =
+        bodies.iter().filter(|b| chosen.contains(&b.name) && !ledger_cams::stays_solid(&b.name)).collect();
+    let [board] = boards.as_slice() else {
+        return Err(format!("add handle: select the one board it goes on (you have {} selected)", boards.len()));
+    };
+    let mut piece = ([f64::INFINITY; 3], [f64::NEG_INFINITY; 3]);
+    for b in bodies.iter().filter(|b| !ledger_cams::stays_solid(&b.name)) {
+        for k in 0..3 {
+            piece.0[k] = piece.0[k].min(b.lo[k]);
+            piece.1[k] = piece.1[k].max(b.hi[k]);
+        }
+    }
+    let placed = crate::ledger_handle::place(board, piece)?;
+    let mut number = 1;
+    while bodies.iter().any(|b| b.name == format!("handle {number}")) {
+        number += 1;
+    }
+    let name = format!("handle {number}");
+    let body = crate::ledger_fittings::draw(app, &name, crate::ledger_handle::steps(&placed))
+        .ok_or("the handle could not be drawn")?;
+    let _ = app.session.execute(
+        "appearance.assign",
+        &json!({ "bodies": [body.clone()], "color": crate::ledger_fittings::colour(Fastener::Handle) }),
+    );
+    ledger_cams::refile(app);
+    app.session.selection = vec![solidcraft_engine::Sel::Body { name: body.clone() }];
+    Ok(format!("{body} added on {} - move it where it goes, then press Calc Holes for its bolt holes", board.name))
 }
 
 fn panel_of<'a>(panels: &'a [Panel], name: &str) -> Result<&'a Panel, String> {

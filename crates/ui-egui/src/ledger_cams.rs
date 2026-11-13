@@ -93,6 +93,7 @@ pub(crate) fn is_marker_name(name: &str) -> bool {
         || name.starts_with(WOODEN.word_prefix())
         || name.starts_with("pin ")
         || name.starts_with("screw ")
+        || crate::ledger_handle::is_handle_name(name)
         || name.starts_with(crate::ledger_fittings::HOLE_MARKER)
 }
 
@@ -115,6 +116,8 @@ fn folder_of(name: &str) -> Option<&'static str> {
         Some("Shelf pins")
     } else if name.starts_with("screw ") {
         Some("Foot screws")
+    } else if crate::ledger_handle::is_handle_name(name) {
+        Some("Handles")
     } else if name.starts_with(crate::ledger_fittings::HOLE_MARKER) {
         Some(HOLES)
     } else {
@@ -162,6 +165,7 @@ pub(crate) fn family(fastener: Fastener) -> (&'static str, &'static str) {
         Fastener::Dowel => ("Dowels", "dowel"),
         Fastener::ShelfPin => ("Shelf pins", "pin"),
         Fastener::Screw => ("Foot screws", "screw"),
+        Fastener::Handle => ("Handles", "handle"),
     }
 }
 
@@ -458,7 +462,13 @@ fn calc_inner(app: &mut crate::SolveApp, keep: &std::collections::BTreeSet<Strin
     // of the first (88 marks had piled up in the 48x72 that way, and every one of them was still listed in the tree).
     // Hand-changed fittings the operator chose to keep stay.
     let earlier: Vec<String> =
-        bodies.iter().filter(|body| body.is_marker() && !kept.contains_key(&body.name)).map(|body| body.name.clone()).collect();
+        bodies
+            .iter()
+            .filter(|body| {
+                body.is_marker() && !kept.contains_key(&body.name) && !crate::ledger_handle::is_handle_name(&body.name)
+            })
+            .map(|body| body.name.clone())
+            .collect();
     if !earlier.is_empty() {
         let _ = app.session.execute("solid.remove", &json!({ "bodies": earlier }));
     }
@@ -799,7 +809,14 @@ fn holes_from_fittings(app: &mut crate::SolveApp, uncut: usize) -> Option<crate:
         }
         crate::ledger_hand::save(app, &every);
     }
-    let mut problems = Vec::new();
+    let handles = match app.session.execute("inspect.measure", &json!({})) {
+        Ok(measured) => {
+            let bodies = boxes(&measured);
+            crate::ledger_handle::bolts(&bodies, &panels_now(&bodies))
+        }
+        Err(_) => (Vec::new(), Vec::new()),
+    };
+    let mut problems = handles.1;
     for name in records.keys() {
         let mine: Vec<crate::ledger_fittings::Bore> = all.iter().filter(|(n, _)| n == name).map(|(_, b)| b.clone()).collect();
         problems.extend(crate::ledger_hand::check(name, &mine, &now, &all));
@@ -817,6 +834,7 @@ fn holes_from_fittings(app: &mut crate::SolveApp, uncut: usize) -> Option<crate:
         None
     };
     let mut bores: Vec<crate::ledger_fittings::Bore> = all.into_iter().map(|(_, b)| b).collect();
+    bores.extend(handles.0);
     // A foot is screwed to the board it sits under: its ⌀8 × 25 hole is added over whatever the fittings placed.
     if let Ok(measured) = app.session.execute("inspect.measure", &json!({})) {
         let bodies = boxes(&measured);
@@ -865,12 +883,18 @@ fn holes_inner(app: &mut crate::SolveApp) -> crate::ledger_fittings::HolesOutcom
         .iter()
         .filter_map(|hole| panels.iter().find(|panel| panel.id == hole.part_id).map(|panel| crate::ledger_fittings::bore(panel, hole)))
         .collect();
-    // A foot is screwed to the board it sits under: its ⌀8 × 25 hole is added over the engine's joints.
+    // A foot is screwed to the board it sits under: its ⌀8 × 25 hole is added over the engine's joints; a handle is
+    // bolted through the board it stands on.
+    let mut problems = Vec::new();
     if let Ok(measured) = app.session.execute("inspect.measure", &json!({})) {
         let bodies = boxes(&measured);
-        bores.extend(foot_screws(&bodies, &panels_now(&bodies)));
+        let panels_here = panels_now(&bodies);
+        bores.extend(foot_screws(&bodies, &panels_here));
+        let (bolts, wrong) = crate::ledger_handle::bolts(&bodies, &panels_here);
+        bores.extend(bolts);
+        problems = wrong;
     }
-    if bores.is_empty() {
+    if bores.is_empty() && problems.is_empty() {
         refile(app);
         return crate::ledger_fittings::HolesOutcome {
             nothing: Some(format!("{} boards, no bore fitted on them", panels.len())),
@@ -879,10 +903,15 @@ fn holes_inner(app: &mut crate::SolveApp) -> crate::ledger_fittings::HolesOutcom
         };
     }
     let refused = thin_lines(&panels, &run);
-    let blocked = (!refused.is_empty()).then(|| "joints without hardware: a board is 1/2\" or thinner".to_owned());
+    let blocked = if !problems.is_empty() {
+        Some(format!("{} hardware problem(s): {}", problems.len(), problems.join("; ")))
+    } else {
+        (!refused.is_empty()).then(|| "joints without hardware: a board is 1/2\" or thinner".to_owned())
+    };
     let mut outcome = crate::ledger_fittings::mark(app, &bores, blocked);
     outcome.uncut = uncut;
     outcome.too_thin = refused;
+    outcome.problems = problems;
     refile(app);
     outcome
 }
