@@ -245,8 +245,16 @@ pub fn fitting_steps(fastener: Fastener, bores: &[&Bore]) -> Option<Vec<Step>> {
                     "diameter": 5.0, "height": 16.0 }),
             }])
         }
-        // A foot's screw is a hole, not a fitting body of its own: it is never drawn here.
-        Fastener::Screw => None,
+        // A screw added by hand: its shank in the bore, and 6 mm of head standing out of the face it goes in from, so
+        // it can be seen and picked.
+        Fastener::Screw => {
+            let screw = find(HoleKind::Screw)?;
+            Some(vec![Step {
+                command: "solid.cylinder",
+                params: json!({ "base": sub(screw.mouth, scale(screw.dir, 6.0)), "axis": screw.dir,
+                    "diameter": screw.dia, "height": screw.depth + 6.0 }),
+            }])
+        }
     }
 }
 

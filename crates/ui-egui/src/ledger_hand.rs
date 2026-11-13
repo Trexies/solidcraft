@@ -207,13 +207,17 @@ pub fn centre(b: ([f64; 3], [f64; 3])) -> [f64; 3] {
     scale(add(b.0, b.1), 0.5)
 }
 
-/// The fittings changed by hand: flipped, marked earlier, or standing somewhere else now. Answers body names.
+/// The fittings changed by hand: added, flipped, marked earlier, standing somewhere else now, or deleted (recorded,
+/// but no longer in the design). Answers body names.
 pub fn hand_changed(app: &mut crate::SolveApp) -> std::collections::BTreeSet<String> {
     let fittings = load(app);
     let now = boxes(app);
     fittings
         .iter()
-        .filter(|(name, f)| now.get(*name).is_some_and(|b| f.hand || f.flipped || f.moved(centre(*b))))
+        .filter(|(name, f)| match now.get(*name) {
+            Some(b) => f.hand || f.flipped || f.moved(centre(*b)),
+            None => true,
+        })
         .map(|(name, _)| name.clone())
         .collect()
 }

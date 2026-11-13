@@ -73,15 +73,15 @@ const MARKER_DEEP: f64 = 14.2;
 /// The tree folder every marker is filed under; each kind gets its own folder inside it.
 const HARDWARE: &str = "Hardware";
 
-struct Box3 {
-    name: String,
-    lo: [f64; 3],
-    hi: [f64; 3],
+pub(crate) struct Box3 {
+    pub(crate) name: String,
+    pub(crate) lo: [f64; 3],
+    pub(crate) hi: [f64; 3],
 }
 
 impl Box3 {
     /// A bore marker this button put in the design on an earlier click.
-    fn is_marker(&self) -> bool {
+    pub(crate) fn is_marker(&self) -> bool {
         is_marker_name(&self.name)
     }
 }
@@ -92,6 +92,7 @@ pub(crate) fn is_marker_name(name: &str) -> bool {
         || name.starts_with("dowel ")
         || name.starts_with(WOODEN.word_prefix())
         || name.starts_with("pin ")
+        || name.starts_with("screw ")
         || name.starts_with(crate::ledger_fittings::HOLE_MARKER)
 }
 
@@ -112,6 +113,8 @@ fn folder_of(name: &str) -> Option<&'static str> {
         Some(WOODEN.folder)
     } else if name.starts_with("pin ") {
         Some("Shelf pins")
+    } else if name.starts_with("screw ") {
+        Some("Foot screws")
     } else if name.starts_with(crate::ledger_fittings::HOLE_MARKER) {
         Some(HOLES)
     } else {
@@ -153,16 +156,16 @@ fn family_of(fastener: Fastener, bores: &[&Hole]) -> (&'static str, &'static str
 }
 
 /// The folder a kind of fastener is filed in, and the word its markers are numbered from.
-fn family(fastener: Fastener) -> (&'static str, &'static str) {
+pub(crate) fn family(fastener: Fastener) -> (&'static str, &'static str) {
     match fastener {
         Fastener::Cam => ("Cams", "cam"),
         Fastener::Dowel => ("Dowels", "dowel"),
         Fastener::ShelfPin => ("Shelf pins", "pin"),
-        Fastener::Screw => ("Holes", "screw"),
+        Fastener::Screw => ("Foot screws", "screw"),
     }
 }
 
-fn boxes(value: &Value) -> Vec<Box3> {
+pub(crate) fn boxes(value: &Value) -> Vec<Box3> {
     let mut out = Vec::new();
     let Some(list) = value.get("bodies").and_then(Value::as_array) else {
         return out;
@@ -183,7 +186,12 @@ fn boxes(value: &Value) -> Vec<Box3> {
 
 /// The bore a foot's fixing screw needs: ⌀8 × 25 mm, straight up into the board the foot sits under, centred on the
 /// foot's footprint. Auto-detected: for each foot, the board directly above whose bottom face it touches.
-fn foot_screws(bodies: &[Box3]) -> Vec<crate::ledger_fittings::Bore> {
+///
+/// Its machine-list position is read in the **engine's** frame for that board (`panels`, from [`panels_from`]), the
+/// same frame every cam and dowel bore of the board is in. An earlier build measured it in a frame of its own (x along
+/// the board's longest side, from its low end), which on a board the engine turns over - the desk's `side (2)` - put
+/// the screw at the wrong end of the board in the machine list.
+fn foot_screws(bodies: &[Box3], panels: &[Panel]) -> Vec<crate::ledger_fittings::Bore> {
     const DIA: f64 = 8.0;
     const DEPTH: f64 = 25.0;
     let mut out = Vec::new();
@@ -203,50 +211,104 @@ fn foot_screws(bodies: &[Box3]) -> Vec<crate::ledger_fittings::Bore> {
             })
             .min_by(|a, b| (a.lo[2] - top).abs().total_cmp(&(b.lo[2] - top).abs()));
         let Some(board) = above else { continue };
+        let Some(panel) = panels.iter().find(|panel| panel.name == board.name) else { continue };
         // The screw drills straight up into the board above, entering at the board's own underside - not at the foot's
         // top, which can sit a hair inside the board (a side's foot overlaps it 1.75 mm) and would start the bore inside
-        // the wood.
-        let mouth = [cx, cy, board.lo[2]];
-        let dir = [0.0, 0.0, 1.0];
-        // The board's own frame, so the machine-list x/y read from its corner like every other bore.
-        let size = [board.hi[0] - board.lo[0], board.hi[1] - board.lo[1], board.hi[2] - board.lo[2]];
-        let thin = (0..3).min_by(|a, b| size[*a].total_cmp(&size[*b])).unwrap_or(2);
-        // Which side of the board it enters: its underside is the back face only when the board lies flat (thin along
-        // world z). A side or a panel stands on its bottom edge, so the screw goes into that edge - the drill must bore
-        // it horizontally, not through the face.
-        let face = if thin == 2 { ledger_holes::Face::Back } else { ledger_holes::Face::Edge };
-        let long = (0..3).max_by(|a, b| size[*a].total_cmp(&size[*b])).unwrap_or(0);
-        let across = (0..3).find(|k| *k != thin && *k != long).unwrap_or(1);
-        let axis = |k: usize| {
-            let mut v = [0.0, 0.0, 0.0];
-            v[k] = 1.0;
-            v
-        };
-        let frame = ledger_holes::Frame {
-            origin: [
-                (board.lo[0] + board.hi[0]) / 2.0,
-                (board.lo[1] + board.hi[1]) / 2.0,
-                (board.lo[2] + board.hi[2]) / 2.0,
-            ],
-            x: axis(long),
-            y: axis(across),
-            z: axis(thin),
-        };
-        let local = frame.to_local(mouth);
-        out.push(crate::ledger_fittings::Bore {
-            board: board.name.clone(),
-            kind: ledger_holes::HoleKind::Screw,
-            station: 0,
-            face,
-            mouth,
-            dir,
-            dia: DIA,
-            depth: DEPTH,
-            local: [local[0] + size[long] / 2.0, local[1] + size[across] / 2.0, local[2] + size[thin] / 2.0],
-            panel: [size[long], size[across], size[thin]],
-        });
+        // the wood. A board lying flat takes it in its face, one standing on its edge in that edge.
+        out.push(bore_at(panel, ledger_holes::HoleKind::Screw, [cx, cy, board.lo[2]], [0.0, 0.0, 1.0], DIA, DEPTH, 0));
     }
     out
+}
+
+/// A bore at a world point, drilled along `dir`, as the engine would record it on `panel`: which face it enters (a
+/// face of the board when `dir` runs through its thickness - front or back by which side the mouth is on - else an
+/// edge), and its machine-list position in the board's own frame. Built through [`crate::ledger_fittings::bore`],
+/// the conversion every engine bore goes through, so a bore placed here and one the engine placed on the same board
+/// read alike.
+pub(crate) fn bore_at(
+    panel: &Panel,
+    kind: ledger_holes::HoleKind,
+    mouth: [f64; 3],
+    dir: [f64; 3],
+    dia: f64,
+    depth: f64,
+    station: u32,
+) -> crate::ledger_fittings::Bore {
+    let z = panel.frame.z;
+    let through = (dir[0] * z[0] + dir[1] * z[1] + dir[2] * z[2]).abs() > 0.9;
+    let local = panel.frame.to_local(mouth);
+    let face = if !through {
+        ledger_holes::Face::Edge
+    } else if local[2] > 0.0 {
+        ledger_holes::Face::Front
+    } else {
+        ledger_holes::Face::Back
+    };
+    // The vendor's conventions (`Hole::at`): y mirrored for a back-face hole, z measured from the near face.
+    let y = if face == ledger_holes::Face::Back { -local[1] } else { local[1] };
+    let hole = Hole {
+        part_id: panel.id,
+        station,
+        kind,
+        face,
+        at: [local[0], y, local[2] + panel.thickness / 2.0],
+        dia,
+        depth,
+    };
+    crate::ledger_fittings::bore(panel, &hole)
+}
+
+/// The boards of the design as the engine reads them - frames, thicknesses, ids - without drilling anything: the
+/// frames a bore placed by hand must be measured in.
+pub(crate) fn panels_from(bodies: &[Box3], declared: Option<&BTreeMap<String, Role>>) -> Vec<Panel> {
+    let boards: Vec<Board> = bodies
+        .iter()
+        .filter(|body| !body.is_marker())
+        .map(|body| Board {
+            name: body.name.clone(),
+            lo: body.lo,
+            hi: body.hi,
+            role: None,
+            declared_role: declared.and_then(|roles| roles.get(&body.name).copied()),
+            link: None,
+            hole_txt: None,
+        })
+        .collect();
+    translate_boards(&boards).panels
+}
+
+/// The engine's run over exactly `bodies` (no selection narrowing it), with the item's construction choosing the
+/// rules: what Calc Camlocks would place on them. `None` with fewer than two boards.
+pub(crate) fn run_on(bodies: &[Box3]) -> Option<(Vec<Panel>, Plan)> {
+    let current = current();
+    let declared = current.as_ref().map(|current| &current.roles);
+    let boards: Vec<Board> = bodies
+        .iter()
+        .filter(|body| !body.is_marker())
+        .map(|body| Board {
+            name: body.name.clone(),
+            lo: body.lo,
+            hi: body.hi,
+            role: None,
+            declared_role: declared.and_then(|roles| roles.get(&body.name).copied()),
+            link: None,
+            hole_txt: None,
+        })
+        .collect();
+    let mut translation = translate_boards(&boards);
+    let mut panels = std::mem::take(&mut translation.panels);
+    if panels.len() < 2 {
+        return None;
+    }
+    let construction = current.as_ref().and_then(|current| current.construction);
+    let (run, _, _) = drill(&mut panels, &translation.roles, construction);
+    Some((panels, run))
+}
+
+/// [`panels_from`] for the design as it stands, with the roles Ledger published.
+pub(crate) fn panels_now(bodies: &[Box3]) -> Vec<Panel> {
+    let current = current();
+    panels_from(bodies, current.as_ref().map(|current| &current.roles))
 }
 
 /// One fastener in the drawing: an engine station, where its block goes, and which fitting it is.
@@ -387,9 +449,11 @@ fn calc_inner(app: &mut crate::SolveApp, keep: &std::collections::BTreeSet<Strin
     };
     let bodies = boxes(&measured);
     let records = crate::ledger_hand::load(app);
-    let kept: BTreeMap<String, crate::ledger_hand::Fitting> =
-        records.into_iter().filter(|(name, _)| keep.contains(name) && bodies.iter().any(|b| &b.name == name)).collect();
-    let kept_keys: std::collections::BTreeSet<String> = kept.values().map(|f| f.key.clone()).collect();
+    let (kept, removed): (BTreeMap<String, crate::ledger_hand::Fitting>, BTreeMap<String, crate::ledger_hand::Fitting>) =
+        records.into_iter().filter(|(name, _)| keep.contains(name)).partition(|(name, _)| bodies.iter().any(|b| &b.name == name));
+    // A fitting deleted by hand stays deleted when the operator keeps their changes: its place in the rule's layout is
+    // taken, and its record is kept (with no body) so the next Calc Camlocks still knows.
+    let kept_keys: std::collections::BTreeSet<String> = kept.values().chain(removed.values()).map(|f| f.key.clone()).collect();
     // What an earlier click drew is cleared first: a second press redraws the marks, it never adds a second set on top
     // of the first (88 marks had piled up in the 48x72 that way, and every one of them was still listed in the tree).
     // Hand-changed fittings the operator chose to keep stay.
@@ -469,8 +533,9 @@ fn calc_inner(app: &mut crate::SolveApp, keep: &std::collections::BTreeSet<Strin
         let (folder, word) = family_of(station.fastener, &bores[index]);
         let number = numbers.entry(word).or_insert(0);
         *number += 1;
-        // A kept fitting holds its name: the new ones count past it.
-        while kept.contains_key(&format!("{word} {number}")) {
+        // A kept fitting holds its name, and so does one deleted by hand (its record stays, so the next Calc Camlocks
+        // still knows it was taken out): the new ones count past both.
+        while kept.contains_key(&format!("{word} {number}")) || removed.contains_key(&format!("{word} {number}")) {
             *number += 1;
         }
         let name = format!("{word} {number}");
@@ -517,6 +582,7 @@ fn calc_inner(app: &mut crate::SolveApp, keep: &std::collections::BTreeSet<Strin
     {
         let now = crate::ledger_hand::boxes(app);
         let mut record = kept;
+        record.extend(removed);
         for (name, index) in &made_fittings {
             let Some(body) = now.get(name).copied() else { continue };
             let group = &placed[*index];
@@ -705,11 +771,13 @@ pub fn clear_holes(app: &mut crate::SolveApp) -> usize {
 /// to, every bore checked. `None` when the design has no recorded fitting (an older design, or none drawn yet).
 fn holes_from_fittings(app: &mut crate::SolveApp, uncut: usize) -> Option<crate::ledger_fittings::HolesOutcome> {
     let mut records = crate::ledger_hand::load(app);
-    let now = crate::ledger_hand::boxes(app);
-    records.retain(|name, _| now.contains_key(name));
+    // No record at all is an older design (or none drawn yet): the engine's own holes. A record whose fittings were
+    // all deleted by hand is not that - it drills none, rather than the rule putting back what was taken out.
     if records.is_empty() {
         return None;
     }
+    let now = crate::ledger_hand::boxes(app);
+    records.retain(|name, _| now.contains_key(name));
     let mut all: Vec<(String, crate::ledger_fittings::Bore)> = Vec::new();
     let mut changed = false;
     for (number, (name, fitting)) in records.iter_mut().enumerate() {
@@ -751,7 +819,8 @@ fn holes_from_fittings(app: &mut crate::SolveApp, uncut: usize) -> Option<crate:
     let mut bores: Vec<crate::ledger_fittings::Bore> = all.into_iter().map(|(_, b)| b).collect();
     // A foot is screwed to the board it sits under: its ⌀8 × 25 hole is added over whatever the fittings placed.
     if let Ok(measured) = app.session.execute("inspect.measure", &json!({})) {
-        bores.extend(foot_screws(&boxes(&measured)));
+        let bodies = boxes(&measured);
+        bores.extend(foot_screws(&bodies, &panels_now(&bodies)));
     }
     let mut outcome = crate::ledger_fittings::mark(app, &bores, blocked);
     outcome.uncut = uncut;
@@ -798,7 +867,8 @@ fn holes_inner(app: &mut crate::SolveApp) -> crate::ledger_fittings::HolesOutcom
         .collect();
     // A foot is screwed to the board it sits under: its ⌀8 × 25 hole is added over the engine's joints.
     if let Ok(measured) = app.session.execute("inspect.measure", &json!({})) {
-        bores.extend(foot_screws(&boxes(&measured)));
+        let bodies = boxes(&measured);
+        bores.extend(foot_screws(&bodies, &panels_now(&bodies)));
     }
     if bores.is_empty() {
         refile(app);
@@ -819,7 +889,7 @@ fn holes_inner(app: &mut crate::SolveApp) -> crate::ledger_fittings::HolesOutcom
 
 /// File every marker in the design under `Hardware`, one folder per kind - the fittings Calc Camlocks drew and the
 /// holes Calc Holes drew together, so neither button's press unfiles the other's.
-fn refile(app: &mut crate::SolveApp) {
+pub(crate) fn refile(app: &mut crate::SolveApp) {
     clear_folders(app);
     let Ok(measured) = app.session.execute("inspect.measure", &json!({})) else {
         return;
@@ -968,7 +1038,7 @@ mod tests {
             b("foot - front left", [0.44, -458.34, -1.75], [21.78, -437.01, 8.76]),
             b("side", [1.59, -600.07, 7.01], [20.64, 0.0, 736.6]),
         ];
-        let screws = foot_screws(&bodies);
+        let screws = foot_screws(&bodies, &panels_from(&bodies, None));
         assert_eq!(screws.len(), 1, "{screws:?}");
         let s = &screws[0];
         assert_eq!(s.board, "side");
@@ -980,9 +1050,45 @@ mod tests {
         assert_eq!(s.dir, [0.0, 0.0, 1.0]);
         assert_eq!(s.dia, 8.0);
         assert_eq!(s.depth, 25.0);
-        // The side stands on its bottom edge: the screw goes into that edge, at its very end.
+        // The side stands on its bottom edge: the screw goes into that edge, at one end of the board as the engine's
+        // own frame for it reads.
         assert_eq!(s.face, ledger_holes::Face::Edge);
-        assert!(s.local[0].abs() < 1e-6, "at the board's end: {:?}", s.local);
+        let panels = panels_from(&bodies, None);
+        let side = panels.iter().find(|p| p.name == "side").expect("the side");
+        let want = side.frame.to_local(s.mouth)[0] + side.width / 2.0;
+        assert!((s.local[0] - want).abs() < 1e-6, "{:?} vs {want}", s.local);
+        assert!(s.local[0].abs() < 1e-6 || (s.local[0] - side.width).abs() < 1e-6, "at an end: {:?}", s.local);
+    }
+
+    /// Both sides of a desk: each foot screw is at the bottom end of its side and each cam bolt at the top end, in the
+    /// same frame the machine list reads - including `side (2)`, which the engine turns over. (An earlier build measured
+    /// the screw in a frame of its own and put `side (2)`'s at the top end, beside the cams.)
+    #[test]
+    fn foot_screws_and_cam_bolts_read_in_the_same_board_frame() {
+        let bodies = vec![
+            b("top", [0.0, -600.0, 736.6], [1200.0, 0.0, 762.0]),
+            b("side", [0.0, -600.0, 7.0], [19.05, 0.0, 736.6]),
+            b("side (2)", [1180.95, -600.0, 7.0], [1200.0, 0.0, 736.6]),
+            b("foot - front left", [1.0, -470.0, -1.75], [18.0, -440.0, 8.76]),
+            b("foot - front right", [1182.0, -470.0, -1.75], [1199.0, -440.0, 8.76]),
+        ];
+        let (panels, run) = run_on(&bodies).expect("the engine ran");
+        let screws = foot_screws(&bodies, &panels);
+        assert_eq!(screws.len(), 2, "{screws:?}");
+        for name in ["side", "side (2)"] {
+            let panel = panels.iter().find(|p| p.name == name).expect("the side");
+            let bolts: Vec<f64> = run
+                .holes
+                .iter()
+                .filter(|h| h.part_id == panel.id && h.kind == ledger_holes::HoleKind::EdgeBolt)
+                .map(|h| crate::ledger_fittings::bore(panel, h).local[0])
+                .collect();
+            assert!(!bolts.is_empty(), "{name} has cams into the top");
+            let screw = screws.iter().find(|s| s.board == name).expect("its screw").local[0];
+            for bolt in bolts {
+                assert!((bolt - screw).abs() > panel.width / 2.0, "{name}: bolt at {bolt}, screw at {screw} - same end");
+            }
+        }
     }
 
     #[test]
@@ -991,7 +1097,7 @@ mod tests {
             b("foot", [100.0, 100.0, 0.0], [120.0, 120.0, 10.0]),
             b("bottom", [0.0, 0.0, 10.0], [800.0, 400.0, 29.05]),
         ];
-        let screws = foot_screws(&bodies);
+        let screws = foot_screws(&bodies, &panels_from(&bodies, None));
         assert_eq!(screws.len(), 1, "{screws:?}");
         assert_eq!(screws[0].face, ledger_holes::Face::Back);
         assert!(screws[0].local[2].abs() < 1e-6, "at the underside: {:?}", screws[0].local);
@@ -1000,7 +1106,7 @@ mod tests {
     #[test]
     fn a_foot_under_nothing_gets_no_screw() {
         let bodies = vec![b("foot - front left", [0.44, -458.34, -1.75], [21.78, -437.01, 8.76])];
-        assert!(foot_screws(&bodies).is_empty());
+        assert!(foot_screws(&bodies, &panels_from(&bodies, None)).is_empty());
     }
 
     #[test]
@@ -1014,7 +1120,7 @@ mod tests {
             b("left side", [1.59, -600.07, 7.01], [20.64, 0.0, 736.6]),
             b("right side", [1179.12, -600.08, 7.01], [1198.17, 0.0, 736.6]),
         ];
-        let screws = foot_screws(&bodies);
+        let screws = foot_screws(&bodies, &panels_from(&bodies, None));
         assert_eq!(screws.len(), 4, "{screws:?}");
         let left = screws.iter().filter(|s| s.board == "left side").count();
         let right = screws.iter().filter(|s| s.board == "right side").count();

@@ -2078,6 +2078,13 @@ fn hardware_panel(app: &mut SolveApp, ui: &egui::Ui, area: Rect, x: f32) -> f32 
     }
     crate::scenario::publish_target("ledger:clear_holes", clear_rect);
     width += clear_width;
+    // Hardware by hand: a cam, a wooden dowel or a foot screw on the boards that are selected.
+    let add_label = "Add";
+    let add_width = button_width_at(ui, add_label, 64.0) + 2.0 * INSET;
+    let add_rect = Rect::from_min_size(pos2(x + width, top + 2.0), vec2(add_width - 2.0 * INSET, BUTTON_HEIGHT));
+    add_dropdown(app, ui, add_rect);
+    crate::scenario::publish_target("ledger:add_hardware", add_rect);
+    width += add_width;
     // The same snap switch as beside the boards: here it keeps moved hardware on its joint.
     let snap_rect = Rect::from_min_size(pos2(x + width, top + 2.0), vec2(SQUARE, BUTTON_HEIGHT));
     let mut snap = SNAP_ON.load(std::sync::atomic::Ordering::Relaxed);
@@ -2094,6 +2101,38 @@ fn hardware_panel(app: &mut SolveApp, ui: &egui::Ui, area: Rect, x: f32) -> f32 
     x
 }
 
+/// The `Add ▾` button: pick a cam, a wooden dowel or a foot screw, and it is put onto the selected boards
+/// ([`crate::ledger_insert`]); the status line says what was added or why nothing was.
+fn add_dropdown(app: &mut SolveApp, ui: &egui::Ui, rect: Rect) {
+    let response = ribbon_button_icon(ui, "add_hardware", rect, "Add", true, false, Some("plus"));
+    let open = egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&response));
+    let response = ribbon_button_icon(ui, "add_hardware", rect, "Add", true, open, Some("plus"));
+    let mut chosen = None;
+    egui::Popup::menu(&response)
+        .frame(crate::ui_kit::Container::menu_frame())
+        .show(|ui| {
+            ui.label(
+                egui::RichText::new("select the two boards it joins (a foot screw: the board above the foot)")
+                    .size(Tokens::get().font_small)
+                    .color(Tokens::get().text_dim),
+            );
+            for what in crate::ledger_insert::Add::ALL {
+                let item = ui.selectable_label(false, what.label());
+                crate::scenario::publish_handle(&format!("ledger:add:{}", what.label().to_lowercase()), item.rect.center());
+                if item.clicked() {
+                    chosen = Some(what);
+                    egui::Popup::close_all(ui.ctx());
+                }
+            }
+        });
+    if let Some(what) = chosen {
+        match crate::ledger_insert::add(app, what) {
+            Ok(line) => app.set_status(line, false),
+            Err(why) => app.set_status(why, true),
+        }
+    }
+}
+
 /// Hand-changed fittings waiting for the operator's answer to a second Calc Camlocks.
 static PENDING_KEEP: std::sync::Mutex<Option<std::collections::BTreeSet<String>>> = std::sync::Mutex::new(None);
 
@@ -2108,7 +2147,7 @@ fn keep_window(app: &mut SolveApp, ctx: &egui::Context) {
             ui.add(
                 egui::Label::new(
                     egui::RichText::new(format!(
-                        "{} {} moved or flipped by hand: {}.",
+                        "{} {} added, moved, flipped or deleted by hand: {}.",
                         hand.len(),
                         if hand.len() == 1 { "fitting was" } else { "fittings were" },
                         hand.iter().cloned().collect::<Vec<_>>().join(", ")
