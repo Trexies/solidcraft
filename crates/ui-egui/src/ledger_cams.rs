@@ -203,12 +203,18 @@ fn foot_screws(bodies: &[Box3]) -> Vec<crate::ledger_fittings::Bore> {
             })
             .min_by(|a, b| (a.lo[2] - top).abs().total_cmp(&(b.lo[2] - top).abs()));
         let Some(board) = above else { continue };
-        // The screw leaves the foot's top face at the foot's centre and drills straight up into the board above.
-        let mouth = [cx, cy, top];
+        // The screw drills straight up into the board above, entering at the board's own underside - not at the foot's
+        // top, which can sit a hair inside the board (a side's foot overlaps it 1.75 mm) and would start the bore inside
+        // the wood.
+        let mouth = [cx, cy, board.lo[2]];
         let dir = [0.0, 0.0, 1.0];
         // The board's own frame, so the machine-list x/y read from its corner like every other bore.
         let size = [board.hi[0] - board.lo[0], board.hi[1] - board.lo[1], board.hi[2] - board.lo[2]];
         let thin = (0..3).min_by(|a, b| size[*a].total_cmp(&size[*b])).unwrap_or(2);
+        // Which side of the board it enters: its underside is the back face only when the board lies flat (thin along
+        // world z). A side or a panel stands on its bottom edge, so the screw goes into that edge - the drill must bore
+        // it horizontally, not through the face.
+        let face = if thin == 2 { ledger_holes::Face::Back } else { ledger_holes::Face::Edge };
         let long = (0..3).max_by(|a, b| size[*a].total_cmp(&size[*b])).unwrap_or(0);
         let across = (0..3).find(|k| *k != thin && *k != long).unwrap_or(1);
         let axis = |k: usize| {
@@ -231,7 +237,7 @@ fn foot_screws(bodies: &[Box3]) -> Vec<crate::ledger_fittings::Bore> {
             board: board.name.clone(),
             kind: ledger_holes::HoleKind::Screw,
             station: 0,
-            face: ledger_holes::Face::Back,
+            face,
             mouth,
             dir,
             dia: DIA,
@@ -967,13 +973,28 @@ mod tests {
         let s = &screws[0];
         assert_eq!(s.board, "side");
         assert_eq!(s.kind, ledger_holes::HoleKind::Screw);
-        // Centred on the foot's footprint, leaving the foot's top face, drilling straight up.
+        // Centred on the foot's footprint, entering at the side's own bottom (not the foot's top, 1.75 mm inside it),
+        // drilling straight up.
         assert!((s.mouth[0] - 11.11).abs() < 1e-9 && (s.mouth[1] + 447.675).abs() < 1e-9, "{:?}", s.mouth);
-        assert!((s.mouth[2] - 8.76).abs() < 1e-6, "{:?}", s.mouth);
+        assert!((s.mouth[2] - 7.01).abs() < 1e-6, "{:?}", s.mouth);
         assert_eq!(s.dir, [0.0, 0.0, 1.0]);
         assert_eq!(s.dia, 8.0);
         assert_eq!(s.depth, 25.0);
-        assert_eq!(s.face, ledger_holes::Face::Back);
+        // The side stands on its bottom edge: the screw goes into that edge, at its very end.
+        assert_eq!(s.face, ledger_holes::Face::Edge);
+        assert!(s.local[0].abs() < 1e-6, "at the board's end: {:?}", s.local);
+    }
+
+    #[test]
+    fn a_foot_under_a_board_lying_flat_screws_into_its_back_face() {
+        let bodies = vec![
+            b("foot", [100.0, 100.0, 0.0], [120.0, 120.0, 10.0]),
+            b("bottom", [0.0, 0.0, 10.0], [800.0, 400.0, 29.05]),
+        ];
+        let screws = foot_screws(&bodies);
+        assert_eq!(screws.len(), 1, "{screws:?}");
+        assert_eq!(screws[0].face, ledger_holes::Face::Back);
+        assert!(screws[0].local[2].abs() < 1e-6, "at the underside: {:?}", screws[0].local);
     }
 
     #[test]
