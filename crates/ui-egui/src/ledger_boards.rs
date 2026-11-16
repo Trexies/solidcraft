@@ -359,36 +359,30 @@ pub fn designs_dir() -> std::path::PathBuf {
     file().with_file_name("designs")
 }
 
-/// Save this design into Ledger's folder instead of asking about it.
+/// Save the shown design into Ledger's folder instead of asking about it, on closing its tab or quitting.
 ///
-/// The shop's ask: no save prompt, because Ledger is the record. A design Ledger opened and the operator changed is written
-/// beside Ledger's database, named by the item's code, and closing asks nothing. Only a design Ledger owns is taken that way:
-/// one with no file of its own, or one already living in this folder. A design the operator saved somewhere else still asks,
-/// because that file is theirs. Started only for Ledger's own editor (`LEDGER_OWNED`), so a standalone SolidCraft keeps its
-/// normal behaviour.
+/// The shop's ask: no save prompt, because Ledger is the record. Only a design Ledger owns is taken that way
+/// (`ledger_save::owned_path`): a tab Ledger opened a product in, saved under THAT product's code, or a file already living
+/// in Ledger's folder. A blank tab or a design the operator saved somewhere else still asks - before, an unsaved blank tab
+/// was filed under whichever item Ledger had opened last, and a second product's tab could be written over the first's.
+/// Started only for Ledger's own editor (`LEDGER_OWNED`), so a standalone SolidCraft keeps its normal behaviour.
 pub fn save_for_ledger(app: &mut SolveApp) -> bool {
-    if std::env::var_os("LEDGER_OWNED").is_none() || !app.session.is_dirty() {
+    if !app.session.is_dirty() {
         return false;
     }
-    let dir = designs_dir();
-    let owned = match app.session.path.as_deref() {
-        None => true,
-        Some(path) => std::path::Path::new(path).parent().is_some_and(|parent| parent == dir),
-    };
-    if !owned {
-        return false;
-    }
-    let Some((code, _)) = open_item() else {
+    let Some(path) = crate::ledger_save::owned_path(&app.session) else {
         return false;
     };
-    if std::fs::create_dir_all(&dir).is_err() {
-        return false;
+    if let Some(dir) = path.parent() {
+        if std::fs::create_dir_all(dir).is_err() {
+            return false;
+        }
     }
-    let path = dir.join(format!("{}.solidcraft", stem_of(&code)));
     let params = serde_json::json!({ "path": path.to_string_lossy(), "overwrite": true });
     match app.session.execute("file.save_as", &params) {
         Ok(_) => {
             app.session.mark_saved();
+            crate::ledger_save::after_save(app, true);
             true
         }
         Err(_) => false,
@@ -418,9 +412,15 @@ pub fn open_item() -> Option<(String, String)> {
 /// `ui.render` draws the model as the viewport shows it, without needing a presented frame, which is what makes this work
 /// whether or not the window is in front.
 pub fn picture(app: &mut SolveApp) -> Result<String, String> {
-    let Some((code, name)) = open_item() else {
+    // The tab's own product first: the last item Ledger opened may be in another tab.
+    let Some((code, name)) = crate::ledger_save::claim_of(app.session.uid).or_else(open_item) else {
         return Err("Ledger has no item open - open one from its Home tab first".to_owned());
     };
+    picture_of(app, &code, &name)
+}
+
+/// Take a picture of the model and file it as `code`'s preview in Ledger.
+pub fn picture_of(app: &mut SolveApp, code: &str, name: &str) -> Result<String, String> {
     let path = file().with_file_name("shots").join(format!("{}.png", stem_of(&code)));
     if let Some(folder) = path.parent() {
         std::fs::create_dir_all(folder).map_err(|error| format!("could not make {}: {error}", folder.display()))?;

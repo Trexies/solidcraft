@@ -67,6 +67,7 @@ pub fn tick(app: &mut SolveApp, wait: bool) {
         None => Err(format!("{command}: the save stopped")),
     };
     app.finish_command(command, &r);
+    crate::ledger_save::after_save(app, r.is_ok());
     crate::documents::saved_for_close(app);
 }
 

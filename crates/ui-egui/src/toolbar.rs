@@ -781,6 +781,10 @@ pub fn save(app: &mut SolveApp) {
         app.tree.capture_prompt = Some(crate::browser::SAVE.into());
         return;
     }
+    // A product Ledger opened goes back into Ledger's folder, with no Save As box.
+    if crate::ledger_save::save(app) {
+        return;
+    }
     if app.session.path.is_some() {
         // Read-only, or changed on disk since it was opened: Save As, or a question, instead.
         if crate::open_elsewhere::check_save(app) {

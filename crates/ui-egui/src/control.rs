@@ -576,6 +576,14 @@ fn dispatch(app: &mut SolveApp, ctx: &egui::Context, method: &str, p: &Value) ->
             ok(json!({"busy": app.file_load.busy()}))
         }
         "ui.documents" => ok(crate::documents::control(app, p)),
+        // Ledger opened a product in the shown tab: Save puts it back into Ledger's folder under this code.
+        "ledger.claim" => {
+            let Some(code) = s("code") else { return err("code is required") };
+            let name = s("name").unwrap_or(code).to_owned();
+            let code = code.to_owned();
+            crate::ledger_save::claim(app, &code, &name);
+            ok(json!({"claimed": code, "uid": app.session.uid}))
+        }
         "ui.home" => {
             match p.get("open").and_then(Value::as_bool) {
                 Some(true) => {

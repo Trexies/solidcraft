@@ -102,6 +102,7 @@ pub mod joint_drag;
 pub(crate) mod joint_handles;
 pub mod keymap;
 pub mod ledger_boards;
+pub mod ledger_save;
 pub mod ledger_cams;
 pub mod ledger_edgeband;
 pub mod ledger_fittings;
@@ -2594,6 +2595,7 @@ impl SolveApp {
         file_load::show(self, ui.ctx());
         open_meshing::show(self, ui.ctx());
         documents::prompt(self, ui.ctx());
+        ledger_save::prompt(self, ui.ctx());
         open_elsewhere::show(self, ui.ctx());
         network_prompt::show(self, ui.ctx());
         update::show(self, ui.ctx());

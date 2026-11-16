@@ -451,8 +451,8 @@ pub fn close(app: &mut SolveApp, i: usize, force: bool) {
     }
     // Closing Ledger's own design tab sends it back to Ledger's folder rather than into a prompt: the record is Ledger's, and
     // the operator was told not to be asked.
-    if !force && i == app.docs.active {
-        crate::ledger_boards::save_for_ledger(app);
+    if !force {
+        ledger_saves(app, i);
     }
     if !force && dirty(app, i) {
         app.docs.closing = Some(i);
@@ -541,6 +541,7 @@ fn batch_step(app: &mut SolveApp) {
         if i >= app.docs.count() {
             continue;
         }
+        ledger_saves(app, i);
         if dirty(app, i) {
             app.docs.closing = Some(i);
             return;
@@ -571,12 +572,19 @@ fn quit_step(app: &mut SolveApp) {
     if app.docs.closing.is_some() {
         return;
     }
-    // A design Ledger opened belongs in Ledger's own folder: it is written there on the way out, so closing asks nothing
-    // about it and nothing is lost. Designs that are the operator's still ask, as before.
-    if crate::ledger_boards::save_for_ledger(app) {
-        app.docs.closing = None;
-    }
-    match (0..app.docs.count()).find(|i| !skip.contains(i) && dirty(app, *i)) {
+    // A design Ledger opened belongs in Ledger's own folder: each is written there on the way out, under its own product's
+    // code, so quitting asks nothing about it and nothing is lost. Designs that are the operator's still ask, as before.
+    let mut tried: Vec<usize> = Vec::new();
+    let next = loop {
+        let Some(i) = (0..app.docs.count()).find(|i| !skip.contains(i) && dirty(app, *i) && !tried.contains(i)) else {
+            break (0..app.docs.count()).find(|i| !skip.contains(i) && dirty(app, *i));
+        };
+        tried.push(i);
+        if !ledger_saves(app, i) {
+            break Some(i);
+        }
+    };
+    match next {
         Some(i) => {
             switch(app, i);
             app.docs.closing = Some(i);
@@ -599,6 +607,26 @@ fn quit_step(app: &mut SolveApp) {
     }
 }
 
+/// Save tab `i` into Ledger's folder when it is Ledger's (`ledger_save::owned_path`) and has changes: shown first, since a
+/// save works on the shown design. `true`: saved.
+fn ledger_saves(app: &mut SolveApp, i: usize) -> bool {
+    if !dirty(app, i) {
+        return false;
+    }
+    let owned = if i == app.docs.active || app.docs.slots.is_empty() {
+        crate::ledger_save::owned_path(&app.session).is_some()
+    } else {
+        app.docs.slots.get(i).and_then(Option::as_ref).is_some_and(|s| crate::ledger_save::owned_path(&s.session).is_some())
+    };
+    if !owned {
+        return false;
+    }
+    if i != app.docs.active {
+        switch(app, i);
+    }
+    crate::ledger_boards::save_for_ledger(app)
+}
+
 /// Is any open design unsaved (the web page asks before it is left)?
 pub fn any_dirty(app: &SolveApp) -> bool {
     (0..app.docs.count()).any(|i| dirty(app, i))
@@ -614,14 +642,14 @@ fn dirty(app: &SolveApp, i: usize) -> bool {
 /// Tab names (with an unsaved-changes flag), in order.
 pub fn tabs_info(app: &SolveApp) -> Vec<(String, bool)> {
     if app.docs.slots.is_empty() {
-        return vec![(app.session.doc.name.clone(), app.session.is_dirty())];
+        return vec![(crate::ledger_save::tab_name(&app.session), app.session.is_dirty())];
     }
     app.docs
         .slots
         .iter()
         .map(|s| match s {
-            Some(d) => (d.session.doc.name.clone(), d.session.is_dirty()),
-            None => (app.session.doc.name.clone(), app.session.is_dirty()),
+            Some(d) => (crate::ledger_save::tab_name(&d.session), d.session.is_dirty()),
+            None => (crate::ledger_save::tab_name(&app.session), app.session.is_dirty()),
         })
         .collect()
 }

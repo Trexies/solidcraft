@@ -41,6 +41,8 @@ mod window_fit;
 
 use solidcraft_engine::{Session, io};
 use solidcraft_ui_egui::{Services, SolveApp};
+/// Ledger's half of saving a product (its production question, and being told of each save).
+pub use solidcraft_ui_egui::ledger_save;
 
 /// Windows: put the restored window back inside the monitor's work area if it is out of reach
 /// (a gone monitor, another scale, a taskbar edge). Sizes are in points, the work area in pixels.
@@ -776,6 +778,14 @@ impl App {
     /// The editor itself.
     pub fn solve(&mut self) -> &mut SolveApp {
         &mut self.solve
+    }
+
+    /// The tab in front, for a host deciding what to show over it: its session's uid, the product Ledger opened in it
+    /// (`ledger_save` claim, its code), and whether its design has a file of its own.
+    pub fn front_tab(&self) -> (u64, Option<String>, bool) {
+        let session = &self.solve.session;
+        let product = ledger_save::claim_of(session.uid).map(|(code, _)| code);
+        (session.uid, product, session.path.is_some())
     }
 }
 
