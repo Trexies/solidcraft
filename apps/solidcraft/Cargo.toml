@@ -7,6 +7,14 @@ license.workspace = true
 publish = false
 default-run = "solidcraft"
 
+[lib]
+name = "solidcraft"
+path = "src/lib.rs"
+
+[[bin]]
+name = "solidcraft"
+path = "src/main.rs"
+
 [features]
 default = ["raytrace-cpu", "bundled-render-library"]
 bundled-render-library = ["solidcraft-engine/bundled-render-library"]
