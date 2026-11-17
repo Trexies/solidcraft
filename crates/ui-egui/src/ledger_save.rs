@@ -59,6 +59,34 @@ fn unclaim(uid: u64) {
     }
 }
 
+/// Whether a tab holds this product (Ledger opened it there).
+pub fn is_claimed(code: &str) -> bool {
+    claims().lock().is_ok_and(|map| map.values().any(|(held, _)| held == code))
+}
+
+/// Ledger deleted this product: close the tab that holds it WITHOUT saving - its claimed tab, or a tab opened from its
+/// design file - and let go of it, so nothing writes the deleted product's design back into Ledger's folder (closing or
+/// quitting saved a product tab under its code, and left an orphan design behind). Answers whether a tab was closed.
+pub fn drop_product(app: &mut SolveApp, code: &str) -> bool {
+    let path = design_path(code);
+    let holds = |session: &solidcraft_engine::Session| {
+        claim_of(session.uid).is_some_and(|(held, _)| held == code)
+            || session.path.as_deref().is_some_and(|own| same_file(std::path::Path::new(own), &path))
+    };
+    let found = (0..app.docs.count()).find(|&i| crate::documents::session_of(app, i).is_some_and(holds));
+    if let Ok(mut map) = claims().lock() {
+        map.retain(|_, (held, _)| held != code);
+    }
+    if let Ok(mut slot) = pending().lock() {
+        if slot.as_ref().is_some_and(|wait| wait.code == code) {
+            *slot = None;
+        }
+    }
+    let Some(i) = found else { return false };
+    crate::documents::close(app, i, true);
+    true
+}
+
 fn owned() -> bool {
     std::env::var_os("LEDGER_OWNED").is_some()
 }

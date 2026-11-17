@@ -632,6 +632,14 @@ pub fn any_dirty(app: &SolveApp) -> bool {
     (0..app.docs.count()).any(|i| dirty(app, i))
 }
 
+/// The session of tab `i`, shown or not.
+pub(crate) fn session_of(app: &SolveApp, i: usize) -> Option<&Session> {
+    if i == app.docs.active || app.docs.slots.is_empty() {
+        return Some(&app.session);
+    }
+    app.docs.slots.get(i).and_then(Option::as_ref).map(|slot| &slot.session)
+}
+
 fn dirty(app: &SolveApp, i: usize) -> bool {
     if i == app.docs.active || app.docs.slots.is_empty() {
         return app.session.is_dirty();
