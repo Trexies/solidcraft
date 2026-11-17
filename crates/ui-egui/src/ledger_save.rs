@@ -87,6 +87,32 @@ pub fn drop_product(app: &mut SolveApp, code: &str) -> bool {
     true
 }
 
+/// Someone else took this product over in Ledger: the tab holding it stays open with its work, but lets go of the product
+/// - no claim, and no file of its own any more - so Save asks where to put it instead of writing over the product that
+/// now belongs to the other person. Answers whether a tab held it.
+pub fn let_go(app: &mut SolveApp, code: &str) -> bool {
+    let path = design_path(code);
+    let holds = |session: &solidcraft_engine::Session| {
+        claim_of(session.uid).is_some_and(|(held, _)| held == code)
+            || session.path.as_deref().is_some_and(|own| same_file(std::path::Path::new(own), &path))
+    };
+    let found = (0..app.docs.count()).find(|&i| crate::documents::session_of(app, i).is_some_and(holds));
+    if let Ok(mut map) = claims().lock() {
+        map.retain(|_, (held, _)| held != code);
+    }
+    if let Ok(mut slot) = pending().lock() {
+        if slot.as_ref().is_some_and(|wait| wait.code == code) {
+            *slot = None;
+        }
+    }
+    let Some(i) = found else { return false };
+    if let Some(session) = crate::documents::session_of_mut(app, i) {
+        session.path = None;
+    }
+    app.set_status(format!("{code} was taken over in Ledger - this tab is a copy now; Save asks where to put it"), true);
+    true
+}
+
 fn owned() -> bool {
     std::env::var_os("LEDGER_OWNED").is_some()
 }

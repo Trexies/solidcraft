@@ -640,6 +640,14 @@ pub(crate) fn session_of(app: &SolveApp, i: usize) -> Option<&Session> {
     app.docs.slots.get(i).and_then(Option::as_ref).map(|slot| &slot.session)
 }
 
+/// The session of tab `i`, to change.
+pub(crate) fn session_of_mut(app: &mut SolveApp, i: usize) -> Option<&mut Session> {
+    if i == app.docs.active || app.docs.slots.is_empty() {
+        return Some(&mut app.session);
+    }
+    app.docs.slots.get_mut(i).and_then(Option::as_mut).map(|slot| &mut slot.session)
+}
+
 fn dirty(app: &SolveApp, i: usize) -> bool {
     if i == app.docs.active || app.docs.slots.is_empty() {
         return app.session.is_dirty();
