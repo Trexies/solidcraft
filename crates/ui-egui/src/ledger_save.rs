@@ -91,11 +91,68 @@ pub fn owned_path(session: &solidcraft_engine::Session) -> Option<PathBuf> {
     path.parent().is_some_and(|parent| same_file(parent, &dir)).then_some(path)
 }
 
-/// The tab's name: a product tab not saved yet shows its code rather than "Untitled".
+/// The tab's name: a product's tab shows its code (not "Untitled", nor the name stored inside its file).
 pub fn tab_name(session: &solidcraft_engine::Session) -> String {
+    // A product's tab is named by its code, saved or not: a copy made from an earlier save carries the original's name
+    // inside its file, and a tab named after the original is the wrong product to the eye.
     match claim_of(session.uid) {
-        Some((code, _)) if session.path.is_none() => code,
-        _ => session.doc.name.clone(),
+        Some((code, _)) => code,
+        None => session.doc.name.clone(),
+    }
+}
+
+/// How many earlier saves of a product are kept (the owner, 2026-11-16: "the last 20 changes").
+pub const HISTORY_KEEP: usize = 20;
+
+/// Where a product's earlier saves are kept: `designs/history/<stem>/`, one `<ms>.solidcraft` per save (named by the time
+/// that version was saved, in milliseconds since 1970) with its picture `<ms>.png` beside it. Ledger reads the same folder.
+pub fn history_dir(code: &str) -> PathBuf {
+    crate::ledger_boards::designs_dir().join("history").join(stem_of(code))
+}
+
+/// Before a product's design is written again: copy the one on disk - and its picture - into the product's history, then
+/// keep only the newest [`HISTORY_KEEP`]. Nothing to keep (never saved yet) is not an error; a copy that fails is only
+/// reported, since refusing the save over it would lose the newer work instead.
+pub fn keep_version(app: &mut SolveApp, code: &str) {
+    if let Err(error) = keep_version_of(code) {
+        app.set_status(format!("saving {code}: its earlier version could not be kept ({error})"), true);
+    }
+}
+
+fn keep_version_of(code: &str) -> std::io::Result<()> {
+    let design = design_path(code);
+    let Ok(meta) = std::fs::metadata(&design) else { return Ok(()) };
+    let saved = meta.modified()?.duration_since(std::time::UNIX_EPOCH).map(|at| at.as_millis()).unwrap_or(0);
+    let dir = history_dir(code);
+    std::fs::create_dir_all(&dir)?;
+    let kept = dir.join(format!("{saved}.solidcraft"));
+    // The same version kept already (saved twice with nothing written between): once is enough.
+    if !kept.exists() {
+        std::fs::copy(&design, &kept)?;
+        let picture = crate::ledger_boards::file().with_file_name("shots").join(format!("{}.png", stem_of(code)));
+        if picture.is_file() {
+            let _ = std::fs::copy(&picture, dir.join(format!("{saved}.png")));
+        }
+    }
+    prune(&dir, HISTORY_KEEP);
+    Ok(())
+}
+
+/// Keep the newest `keep` versions in `dir`, each with its picture.
+pub fn prune(dir: &std::path::Path, keep: usize) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let mut versions: Vec<u128> = entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let path = entry.path();
+            (path.extension()? == "solidcraft").then_some(())?;
+            path.file_stem()?.to_str()?.parse().ok()
+        })
+        .collect();
+    versions.sort_unstable_by(|a, b| b.cmp(a));
+    for old in versions.into_iter().skip(keep) {
+        let _ = std::fs::remove_file(dir.join(format!("{old}.solidcraft")));
+        let _ = std::fs::remove_file(dir.join(format!("{old}.png")));
     }
 }
 
@@ -130,6 +187,7 @@ pub fn save(app: &mut SolveApp) -> bool {
 }
 
 fn start(app: &mut SolveApp, code: &str) {
+    keep_version(app, code);
     let path = design_path(code);
     if let Some(dir) = path.parent() {
         if let Err(error) = std::fs::create_dir_all(dir) {
@@ -201,6 +259,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn history_keeps_the_newest_twenty_with_their_pictures() {
+        let dir = std::env::temp_dir().join(format!("sc-history-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for at in 1..=25u128 {
+            std::fs::write(dir.join(format!("{at}.solidcraft")), b"d").unwrap();
+            std::fs::write(dir.join(format!("{at}.png")), b"p").unwrap();
+        }
+        prune(&dir, HISTORY_KEEP);
+        let mut left: Vec<String> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        left.sort();
+        assert_eq!(left.len(), 40, "20 designs and their 20 pictures: {left:?}");
+        assert!(!dir.join("5.solidcraft").exists() && !dir.join("5.png").exists(), "the oldest went, picture too");
+        assert!(dir.join("6.solidcraft").exists() && dir.join("25.solidcraft").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn a_code_becomes_the_same_file_name_ledger_uses() {
         assert_eq!(stem_of("SOL-DKS-2448-3D (1)"), "SOL-DKS-2448-3D--1-");
         assert_eq!(stem_of("BASE_CAB-36"), "BASE_CAB-36");
@@ -213,6 +288,9 @@ mod tests {
         let first = h.app.session.uid;
         assert_eq!(claim_of(first).map(|c| c.0), Some("T-CLAIM-1".to_owned()));
         assert_eq!(tab_name(&h.app.session), "T-CLAIM-1", "an unsaved product tab is named by its code");
+        h.app.session.path = Some("elsewhere/Original.solidcraft".into());
+        assert_eq!(tab_name(&h.app.session), "T-CLAIM-1", "and so is one with a file whose design is named otherwise");
+        h.app.session.path = None;
         // The same product claimed again (opened again into another tab) moves the claim.
         h.app.session = solidcraft_engine::Session::default();
         claim(&mut h.app, "T-CLAIM-1", "Table");

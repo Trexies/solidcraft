@@ -378,6 +378,15 @@ pub fn save_for_ledger(app: &mut SolveApp) -> bool {
             return false;
         }
     }
+    // A product's design written over keeps the one before it in the product's history.
+    // (A design of Ledger's folder opened with no claim is named by its file; the file name is the code's stem, which is
+    // its own stem, so the history folder is the same either way.)
+    let code = crate::ledger_save::claim_of(app.session.uid)
+        .map(|(code, _)| code)
+        .or_else(|| path.file_stem().map(|stem| stem.to_string_lossy().into_owned()));
+    if let Some(code) = code {
+        crate::ledger_save::keep_version(app, &code);
+    }
     let params = serde_json::json!({ "path": path.to_string_lossy(), "overwrite": true });
     match app.session.execute("file.save_as", &params) {
         Ok(_) => {
