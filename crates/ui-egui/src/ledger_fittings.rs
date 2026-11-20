@@ -249,6 +249,8 @@ pub fn fitting_steps(fastener: Fastener, bores: &[&Bore]) -> Option<Vec<Step>> {
         // it can be seen and picked.
         // A handle is drawn whole when it is added (`ledger_handle::steps`), never from its bores.
         Fastener::Handle => None,
+        // Designed hardware is a linked part of its own; its holes are drawn as markers like any other bore.
+        Fastener::Designed => None,
         Fastener::Screw => {
             let screw = find(HoleKind::Screw)?;
             Some(vec![Step {
@@ -268,6 +270,7 @@ pub fn colour(fastener: Fastener) -> &'static str {
         Fastener::ShelfPin => "#8E9399",
         Fastener::Screw => "#8E9399",
         Fastener::Handle => "#B8BCC2",
+        Fastener::Designed => "#B8BCC2",
     }
 }
 
@@ -414,7 +417,7 @@ pub fn mark(app: &mut crate::SolveApp, bores: &[Bore], blocked: Option<String>) 
         *sizes.entry(((bore.dia * 10.0).round() as i64, (bore.depth * 10.0).round() as i64)).or_default() += 1;
         record.push(json!({
             "board": bore.board,
-            "fitting": match bore.fastener() { Fastener::Cam => "cam", Fastener::Dowel => "dowel", Fastener::ShelfPin => "pin", Fastener::Screw => "screw", Fastener::Handle => "handle" },
+            "fitting": match bore.fastener() { Fastener::Cam => "cam", Fastener::Dowel => "dowel", Fastener::ShelfPin => "pin", Fastener::Screw => "screw", Fastener::Handle => "handle", Fastener::Designed => "hardware" },
             "bore": format!("{:?}", bore.kind),
             "station": bore.station,
             "face": match bore.face { Face::Front => "front", Face::Back => "back", Face::Edge => "edge" },

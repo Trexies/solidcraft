@@ -147,7 +147,8 @@ fn add_inner(app: &mut crate::SolveApp, what: Add) -> Result<String, String> {
     let picked = |want_feet: bool| -> Vec<&Box3> {
         bodies
             .iter()
-            .filter(|b| chosen.contains(&b.name) && !b.is_marker() && ledger_cams::stays_solid(&b.name) == want_feet)
+            .filter(|b| chosen.contains(&b.name) && !b.is_marker() && !crate::ledger_designed::is_hardware_body(&b.name))
+            .filter(|b| ledger_cams::stays_solid(&b.name) == want_feet)
             .collect()
     };
     let boards = picked(false);

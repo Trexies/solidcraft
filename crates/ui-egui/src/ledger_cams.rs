@@ -100,6 +100,9 @@ pub(crate) fn is_marker_name(name: &str) -> bool {
 /// Whether a body is hardware the Ledger tab's **edges** view keeps solid: a fitting or hole marker this tab drew, or
 /// a foot the Name button named. Everything else is a board, drawn as outlines only.
 pub(crate) fn stays_solid(name: &str) -> bool {
+    if crate::ledger_designed::is_hardware_body(name) {
+        return true;
+    }
     let lower = name.trim().to_ascii_lowercase();
     is_marker_name(&lower) || lower == "foot" || lower.starts_with("foot ") || lower.starts_with("foot-")
 }
@@ -166,6 +169,7 @@ pub(crate) fn family(fastener: Fastener) -> (&'static str, &'static str) {
         Fastener::ShelfPin => ("Shelf pins", "pin"),
         Fastener::Screw => ("Foot screws", "screw"),
         Fastener::Handle => ("Handles", "handle"),
+        Fastener::Designed => ("Hardware holes", "hardware"),
     }
 }
 
@@ -199,7 +203,10 @@ fn foot_screws(bodies: &[Box3], panels: &[Panel]) -> Vec<crate::ledger_fittings:
     const DIA: f64 = 8.0;
     const DEPTH: f64 = 25.0;
     let mut out = Vec::new();
-    for foot in bodies.iter().filter(|b| stays_solid(&b.name) && !is_marker_name(&b.name)) {
+    for foot in bodies
+        .iter()
+        .filter(|b| stays_solid(&b.name) && !is_marker_name(&b.name) && !crate::ledger_designed::is_hardware_body(&b.name))
+    {
         let cx = (foot.lo[0] + foot.hi[0]) / 2.0;
         let cy = (foot.lo[1] + foot.hi[1]) / 2.0;
         let top = foot.hi[2];
@@ -267,7 +274,7 @@ pub(crate) fn bore_at(
 pub(crate) fn panels_from(bodies: &[Box3], declared: Option<&BTreeMap<String, Role>>) -> Vec<Panel> {
     let boards: Vec<Board> = bodies
         .iter()
-        .filter(|body| !body.is_marker())
+        .filter(|body| !body.is_marker() && !crate::ledger_designed::is_hardware_body(&body.name))
         .map(|body| Board {
             name: body.name.clone(),
             lo: body.lo,
@@ -288,7 +295,7 @@ pub(crate) fn run_on(bodies: &[Box3]) -> Option<(Vec<Panel>, Plan)> {
     let declared = current.as_ref().map(|current| &current.roles);
     let boards: Vec<Board> = bodies
         .iter()
-        .filter(|body| !body.is_marker())
+        .filter(|body| !body.is_marker() && !crate::ledger_designed::is_hardware_body(&body.name))
         .map(|body| Board {
             name: body.name.clone(),
             lo: body.lo,
@@ -729,7 +736,8 @@ fn engine_on(app: &crate::SolveApp, bodies: Vec<Box3>) -> Result<(Vec<Panel>, Pl
     let declared_roles = current.as_ref().map(|current| &current.roles);
     let boards: Vec<Board> = bodies
         .iter()
-        .filter(|body| !body.is_marker() && (selected.is_empty() || selected.contains(&body.name)))
+        .filter(|body| !body.is_marker() && !crate::ledger_designed::is_hardware_body(&body.name))
+        .filter(|body| selected.is_empty() || selected.contains(&body.name))
         .map(|body| Board {
             name: body.name.clone(),
             lo: body.lo,
@@ -809,10 +817,19 @@ fn holes_from_fittings(app: &mut crate::SolveApp, uncut: usize) -> Option<crate:
         }
         crate::ledger_hand::save(app, &every);
     }
+    crate::ledger_designed::refresh(app);
+    let placed = crate::ledger_designed::placed(&mut app.session);
     let handles = match app.session.execute("inspect.measure", &json!({})) {
         Ok(measured) => {
             let bodies = boxes(&measured);
-            crate::ledger_handle::bolts(&bodies, &panels_now(&bodies))
+            let panels_here = panels_now(&bodies);
+            let (mut found, mut wrong) = crate::ledger_handle::bolts(&bodies, &panels_here);
+            // Hardware designed in SolidCraft: each placed piece's cutters, in the version that piece was given.
+            let (cuts, wrong_cuts) =
+                crate::ledger_designed::holes(&placed, &crate::ledger_designed::list(), &bodies, &panels_here);
+            found.extend(cuts);
+            wrong.extend(wrong_cuts);
+            (found, wrong)
         }
         Err(_) => (Vec::new(), Vec::new()),
     };
@@ -863,8 +880,12 @@ fn holes_inner(app: &mut crate::SolveApp) -> crate::ledger_fittings::HolesOutcom
     if let Some(outcome) = holes_from_fittings(app, uncut) {
         return outcome;
     }
-    let (panels, run, _, _) = match engine(app) {
-        Ok(found) => found,
+    crate::ledger_designed::refresh(app);
+    let placed = crate::ledger_designed::placed(&mut app.session);
+    let (panels, run) = match engine(app) {
+        Ok((panels, run, _, _)) => (panels, Some(run)),
+        // Designed hardware drills a single board too: no joint is needed for it.
+        Err(_) if !placed.is_empty() => (Vec::new(), None),
         Err(panels) => {
             refile(app);
             return crate::ledger_fittings::HolesOutcome {
@@ -879,8 +900,8 @@ fn holes_inner(app: &mut crate::SolveApp) -> crate::ledger_fittings::HolesOutcom
         }
     };
     let mut bores: Vec<crate::ledger_fittings::Bore> = run
-        .holes
         .iter()
+        .flat_map(|run| run.holes.iter())
         .filter_map(|hole| panels.iter().find(|panel| panel.id == hole.part_id).map(|panel| crate::ledger_fittings::bore(panel, hole)))
         .collect();
     // A foot is screwed to the board it sits under: its ⌀8 × 25 hole is added over the engine's joints; a handle is
@@ -893,6 +914,10 @@ fn holes_inner(app: &mut crate::SolveApp) -> crate::ledger_fittings::HolesOutcom
         let (bolts, wrong) = crate::ledger_handle::bolts(&bodies, &panels_here);
         bores.extend(bolts);
         problems = wrong;
+        // Hardware designed in SolidCraft: each placed piece's cutters, in the version that piece was given.
+        let (cuts, wrong) = crate::ledger_designed::holes(&placed, &crate::ledger_designed::list(), &bodies, &panels_here);
+        bores.extend(cuts);
+        problems.extend(wrong);
     }
     if bores.is_empty() && problems.is_empty() {
         refile(app);
@@ -902,7 +927,7 @@ fn holes_inner(app: &mut crate::SolveApp) -> crate::ledger_fittings::HolesOutcom
             ..Default::default()
         };
     }
-    let refused = thin_lines(&panels, &run);
+    let refused = run.as_ref().map(|run| thin_lines(&panels, run)).unwrap_or_default();
     let blocked = if !problems.is_empty() {
         Some(format!("{} hardware problem(s): {}", problems.len(), problems.join("; ")))
     } else {

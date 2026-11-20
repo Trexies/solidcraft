@@ -84,6 +84,7 @@ fn kind_from(name: &str) -> Option<HoleKind> {
         "ShelfPin" => HoleKind::ShelfPin,
         "Screw" => HoleKind::Screw,
         "HandleBolt" => HoleKind::HandleBolt,
+        "Designed" => HoleKind::Designed,
         _ => return None,
     })
 }
@@ -339,6 +340,7 @@ fn short(kind: HoleKind) -> &'static str {
         HoleKind::ShelfPin => "pin",
         HoleKind::Screw => "screw",
         HoleKind::HandleBolt => "handle bolt",
+        HoleKind::Designed => "hardware",
     }
 }
 

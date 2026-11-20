@@ -1792,6 +1792,7 @@ fn cut_panel_window(app: &mut SolveApp, ctx: &egui::Context, board: &Board) {
 /// The tab's ribbon: groups of buttons laid out exactly as the other tabs lay out their sections - buttons across the top, the
 /// group's name under them, a hairline after it, and every group starting on the same line.
 pub fn ribbon(app: &mut SolveApp, ui: &mut egui::Ui, area: Rect) {
+    crate::ledger_designed::refresh(app);
     let t = Tokens::get();
     let mut sub = subtab(ui.ctx());
     let top = area.top();
@@ -2117,6 +2118,7 @@ fn add_dropdown(app: &mut SolveApp, ui: &egui::Ui, rect: Rect) {
     let open = egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&response));
     let response = ribbon_button_icon(ui, "add_hardware", rect, "Add", true, open, Some("plus"));
     let mut chosen = None;
+    let mut chosen_designed = None;
     egui::Popup::menu(&response)
         .frame(crate::ui_kit::Container::menu_frame())
         .show(|ui| {
@@ -2133,7 +2135,31 @@ fn add_dropdown(app: &mut SolveApp, ui: &egui::Ui, rect: Rect) {
                     egui::Popup::close_all(ui.ctx());
                 }
             }
+            // Hardware the shop designed in Ledger's Hardware tab: its newest version, set on the selected board.
+            let designed = crate::ledger_designed::list();
+            if !designed.is_empty() {
+                ui.separator();
+                ui.label(
+                    egui::RichText::new("designed hardware (newest version) - goes on top of the selected board")
+                        .size(Tokens::get().font_small)
+                        .color(Tokens::get().text_dim),
+                );
+                for piece in designed {
+                    let item = ui.selectable_label(false, format!("{} (v{})", piece.name, piece.version));
+                    crate::scenario::publish_handle(&format!("ledger:add:hw:{}", piece.id), item.rect.center());
+                    if item.clicked() {
+                        chosen_designed = Some(piece);
+                        egui::Popup::close_all(ui.ctx());
+                    }
+                }
+            }
         });
+    if let Some(piece) = chosen_designed {
+        match crate::ledger_designed::insert(app, &piece) {
+            Ok(line) => app.set_status(line, false),
+            Err(why) => app.set_status(why, true),
+        }
+    }
     if let Some(what) = chosen {
         match crate::ledger_insert::add(app, what) {
             Ok(line) => app.set_status(line, false),

@@ -115,6 +115,7 @@ pub mod ledger_resize;
 pub mod ledger_hand;
 pub mod ledger_insert;
 pub mod ledger_handle;
+pub mod ledger_designed;
 mod length_input;
 mod linked_source;
 #[cfg(test)]
@@ -1095,6 +1096,8 @@ impl SolveApp {
             timeline::stop_playback(self);
             // A board in the design is stock: its thickness and its sheet are not a person's to stretch. The guard measures
             // the tagged bodies after any change and takes an illegal one back.
+            // Which bodies are designed hardware (never boards) is read again after any change.
+            crate::ledger_designed::refresh(self);
             if done.is_ok() && !matches!(id, "edit.undo" | "edit.redo") {
                 crate::ledger_boards::enforce(self);
             }
