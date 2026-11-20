@@ -364,7 +364,21 @@ pub fn insert(app: &mut crate::SolveApp, piece: &Designed) -> Result<String, Str
         .map(|measured| crate::ledger_cams::boxes(&measured))
         .and_then(|bodies| bodies.into_iter().find(|b| chosen.contains(&b.name) && !b.is_marker() && !crate::ledger_cams::stays_solid(&b.name)))
         .map_or([0.0, 0.0, 0.0], |board| [(board.lo[0] + board.hi[0]) / 2.0, (board.lo[1] + board.hi[1]) / 2.0, board.hi[2]]);
-    let name = format!("{} v{}", piece.name, piece.version);
+    // A name of its own, so a second one in the tree and in Calc Holes' messages is told apart: "Clamp v1 (2)".
+    let base = format!("{} v{}", piece.name, piece.version);
+    let taken: Vec<String> = app
+        .session
+        .execute("component.list", &json!({ "compact": true }))
+        .ok()
+        .and_then(|list| list.get("components").and_then(Value::as_array).cloned())
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|c| c.get("name").and_then(Value::as_str).map(str::to_owned))
+        .collect();
+    let name = (1..)
+        .map(|n| if n == 1 { base.clone() } else { format!("{base} ({n})") })
+        .find(|name| !taken.contains(name))
+        .unwrap_or(base);
     app.run("component.insert_design", json!({ "path": path.to_string_lossy(), "name": name, "translate": at }))?;
     // The board it was set on stays unselected: a selection narrows Calc Holes to the boards picked.
     let _ = app.run("select.clear", json!({}));
